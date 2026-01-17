@@ -1,0 +1,75 @@
+# ===============================
+# Node / Package managers
+# ===============================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===============================
+# Environment variables
+# ===============================
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# ===============================
+# Next.js
+# ===============================
+.next/
+out/
+.vercel/
+
+# ===============================
+# Build outputs
+# ===============================
+dist/
+build/
+
+# ===============================
+# Logs
+# ===============================
+logs/
+*.log
+
+# ===============================
+# Database
+# ===============================
+*.sqlite
+*.sqlite3
+*.db
+mongodb-data/
+dump/
+
+# ===============================
+# OS / Editor files
+# ===============================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===============================
+# IDEs
+# ===============================
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+
+.idea/
+*.iml
+
+# ===============================
+# Testing
+# ===============================
+coverage/
+.nyc_output/
+
+# ===============================
+# Misc
+# ===============================
+.cache/
+.tmp/
+temp/
