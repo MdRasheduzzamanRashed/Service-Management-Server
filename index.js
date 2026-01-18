@@ -32,6 +32,7 @@ app.use(
 app.use(express.json());
 
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.get("/docs.json", (req, res) => res.json(swaggerSpec));
 
 await connectDB();
 
