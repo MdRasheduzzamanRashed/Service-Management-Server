@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const uri = process.env.MONGO_URI;
-const dbName = process.env.DB_NAME || "AgileSM";
+const dbName = process.env.DB_NAME;
 
 if (!uri) {
   throw new Error("MONGO_URI is not set in environment");

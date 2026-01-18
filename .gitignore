@@ -15,7 +15,7 @@ pnpm-debug.log*
 .env.development
 .env.production
 .env.test
-
+.env.example
 # ===============================
 # Next.js
 # ===============================
