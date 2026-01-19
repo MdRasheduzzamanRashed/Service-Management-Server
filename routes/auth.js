@@ -5,12 +5,19 @@ import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import { db } from "../db.js";
 import { XMLParser } from "fast-xml-parser";
+import { authMiddleware } from "../middleware/authMiddleware.js";
 
 dotenv.config();
 const router = express.Router();
 
 const EMPLOYEES_API =
   "https://workforcemangementtool.onrender.com/api/employees";
+const EMPLOYEES_API_TIMEOUT_MS = 8000;
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("Missing JWT_SECRET");
+}
 
 const ALLOWED_EMPLOYEE_ROLES = new Set([
   "PROJECT_MANAGER",
@@ -56,8 +63,6 @@ function safeUser(u) {
 }
 
 function signToken(u) {
-  if (!process.env.JWT_SECRET) throw new Error("Missing JWT_SECRET");
-
   return jwt.sign(
     {
       _id: String(u._id),
@@ -67,7 +72,7 @@ function signToken(u) {
       email: u.email || "",
       role: u.role || "",
     },
-    process.env.JWT_SECRET,
+    JWT_SECRET,
     { expiresIn: "7d" },
   );
 }
@@ -95,9 +100,25 @@ const xmlParser = new XMLParser({
 });
 
 async function getEmployees() {
-  const res = await fetch(EMPLOYEES_API, {
-    headers: { Accept: "application/xml, text/xml, application/json" },
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    EMPLOYEES_API_TIMEOUT_MS,
+  );
+  let res;
+  try {
+    res = await fetch(EMPLOYEES_API, {
+      headers: { Accept: "application/xml, text/xml, application/json" },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error("Employees API timeout");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!res.ok) throw new Error(`Employees API failed: ${res.status}`);
 
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
@@ -148,7 +169,7 @@ async function findEmployeeByEmail(email) {
  *       503:
  *         description: Employees service unavailable
  */
-router.get("/prefill", async (req, res) => {
+router.get("/api/auth/prefill", async (req, res) => {
   try {
     const email = req.query.email;
     if (!email) return res.status(400).json({ error: "Email is required" });
@@ -164,14 +185,13 @@ router.get("/prefill", async (req, res) => {
     if (!employee) {
       return res
         .status(403)
-        .json({ error: "Unauthorized email. Not found in employee records." });
+        .json({ error: "Unauthorized to register for this system." });
     }
 
     const role = normalizeRole(employee?.role);
     if (!ALLOWED_EMPLOYEE_ROLES.has(role)) {
       return res.status(403).json({
-        error: "Unauthorized role. You cannot register for this system.",
-        roleFound: role,
+        error: "Unauthorized to register for this system.",
       });
     }
 
@@ -179,7 +199,7 @@ router.get("/prefill", async (req, res) => {
     if (!username) {
       return res
         .status(403)
-        .json({ error: "Username missing in employee record. Contact admin." });
+        .json({ error: "Unauthorized to register for this system." });
     }
 
     return res.json({
@@ -222,7 +242,7 @@ router.get("/prefill", async (req, res) => {
  *       403: { description: Not allowed }
  *       503: { description: Employees service unavailable }
  */
-router.post("/register", async (req, res) => {
+router.post("/api/auth/register", async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || !password) {
@@ -239,16 +259,14 @@ router.post("/register", async (req, res) => {
 
     if (!employee) {
       return res.status(403).json({
-        error: "Registration denied. Email not found in employee records.",
+        error: "Registration denied. You are not authorized to register.",
       });
     }
 
     const role = normalizeRole(employee?.role);
     if (!ALLOWED_EMPLOYEE_ROLES.has(role)) {
       return res.status(403).json({
-        error:
-          "Registration denied. Only PROJECT_MANAGER, RESOURCE_PLANNER, PROCUREMENT_OFFICER, SYSTEM_ADMIN can register.",
-        roleFound: role,
+        error: "Registration denied. You are not authorized to register.",
       });
     }
 
@@ -256,7 +274,7 @@ router.post("/register", async (req, res) => {
     if (!usernameRaw) {
       return res
         .status(403)
-        .json({ error: "Username missing in employee record. Contact admin." });
+        .json({ error: "Registration denied. You are not authorized to register." });
     }
 
     const username = normalizeUsername(usernameRaw);
@@ -328,7 +346,7 @@ router.post("/register", async (req, res) => {
  *       200: { description: Logged in }
  *       400: { description: Invalid username or password }
  */
-router.post("/login", async (req, res) => {
+router.post("/api/auth/login", async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (!username || !password) {
@@ -364,7 +382,7 @@ router.post("/login", async (req, res) => {
  * @openapi
  * /api/auth/change-password:
  *   post:
- *     summary: Change password by username
+ *     summary: Change password for current user (requires Bearer token)
  *     tags: [Auth]
  *     requestBody:
  *       required: true
@@ -372,7 +390,7 @@ router.post("/login", async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [username, oldPassword, newPassword]
+ *             required: [oldPassword, newPassword]
  *             properties:
  *               username: { type: string }
  *               oldPassword: { type: string }
@@ -381,29 +399,43 @@ router.post("/login", async (req, res) => {
  *       200: { description: Password updated }
  *       400: { description: Validation error }
  */
-router.post("/change-password", async (req, res) => {
+router.post("/api/auth/change-password", authMiddleware, async (req, res) => {
   try {
     const { username, oldPassword, newPassword } = req.body || {};
-    if (!username || !oldPassword || !newPassword) {
-      return res.status(400).json({ error: "All fields are required" });
+    if (!oldPassword || !newPassword) {
+      return res
+        .status(400)
+        .json({ error: "Old and new passwords are required" });
     }
 
-    const normUsername = normalizeUsername(username);
+    const tokenUsername = normalizeUsername(req.user?.username);
+    if (!tokenUsername) {
+      return res.status(401).json({ error: "Token invalid or expired" });
+    }
+
+    const bodyUsername = username
+      ? normalizeUsername(username)
+      : tokenUsername;
+    if (bodyUsername !== tokenUsername) {
+      return res.status(403).json({ error: "Not authorized" });
+    }
 
     const user = await db
       .collection("users")
-      .findOne({ username: normUsername });
-    if (!user) return res.status(400).json({ error: "User not found" });
+      .findOne({ username: tokenUsername });
+    if (!user) {
+      return res.status(400).json({ error: "Invalid credentials" });
+    }
 
     const match = await bcrypt.compare(oldPassword, user.password);
     if (!match)
-      return res.status(400).json({ error: "Old password is incorrect" });
+      return res.status(400).json({ error: "Invalid credentials" });
 
     const hashed = await bcrypt.hash(newPassword, 10);
 
     await db
       .collection("users")
-      .updateOne({ username: normUsername }, { $set: { password: hashed } });
+      .updateOne({ username: tokenUsername }, { $set: { password: hashed } });
 
     return res.json({ message: "Password updated successfully" });
   } catch (err) {

@@ -1,4 +1,4 @@
-// server.js (or index.js)
+// server.js (Render-ready)
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -20,23 +20,41 @@ import contractsRoutes from "./routes/contracts.js";
 dotenv.config();
 
 const app = express();
+app.set("trust proxy", 1); // ✅ important behind Render proxy/load balancer
+
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8000;
 
+// ✅ Allowed origins (local + deployed frontend)
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  process.env.CLIENT_URL, // e.g. https://your-frontend.vercel.app
+].filter(Boolean);
+
 app.use(
   cors({
-    origin: ["http://localhost:3000"],
-    credentials: true,
-  })
-);
-app.use(express.json());
+    origin: (origin, cb) => {
+      // allow Postman/server-to-server (no origin header)
+      if (!origin) return cb(null, true);
 
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+
+      return cb(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    credentials: true,
+  }),
+);
+
+app.use(express.json({ limit: "2mb" }));
+
+// ✅ Swagger
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.get("/docs.json", (req, res) => res.json(swaggerSpec));
 
+// ✅ DB connect once at startup
 await connectDB();
 
-// ✅ IMPORTANT: NO PREFIX HERE
+// ✅ IMPORTANT: NO PREFIX HERE (your routers already contain /api/..)
 app.use(authRoutes);
 app.use(requestsRoutes);
 app.use(offersRoutes);
@@ -45,10 +63,13 @@ app.use(notificationsRoutes);
 app.use(contractsRoutes);
 app.use(skillsRoutes);
 
+// ✅ Health check
 app.get("/", (req, res) => res.json({ status: "ok" }));
 
+// ✅ Socket.io
 initSocket(server);
 
 server.listen(PORT, () => {
   console.log("Backend listening on port", PORT);
+  console.log("Allowed origins:", ALLOWED_ORIGINS);
 });
