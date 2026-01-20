@@ -1,201 +1,96 @@
+// routes/requests.js
 import express from "express";
 import { ObjectId } from "mongodb";
 import { db } from "../db.js";
 
 const router = express.Router();
 
-/* ============================================================
-   AUTH (header-based)
-   Frontend must send:
-   - x-user-id:   Mongo ObjectId string
-   - x-user-role: ProjectManager | ProcurementOfficer | ResourcePlanner | System | ...
-============================================================ */
-function getUser(req) {
-  const role = (req.headers["x-user-role"] || "").toString().trim();
-  const userIdRaw = (req.headers["x-user-id"] || "").toString().trim();
+function normalizeRole(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
 
-  if (!role) return { error: "Missing x-user-role" };
-  if (!userIdRaw) return { error: "Missing x-user-id" };
+  const upper = s.toUpperCase().replace(/\s+/g, "_");
+  const noUnderscore = upper.replace(/_/g, "");
 
-  let userId;
-  try {
-    userId = new ObjectId(userIdRaw);
-  } catch {
-    return { error: "Invalid x-user-id" };
-  }
+  const map = {
+    PROJECTMANAGER: "PROJECT_MANAGER",
+    PROJECT_MANAGER: "PROJECT_MANAGER",
+    PROCUREMENTOFFICER: "PROCUREMENT_OFFICER",
+    PROCUREMENT_OFFICER: "PROCUREMENT_OFFICER",
+    RESOURCEPLANNER: "RESOURCE_PLANNER",
+    RESOURCE_PLANNER: "RESOURCE_PLANNER",
+    SYSTEMADMIN: "SYSTEM_ADMIN",
+    SYSTEM_ADMIN: "SYSTEM_ADMIN",
+    SYSTEMADMINISTRATOR: "SYSTEM_ADMIN",
+    SYSTEM_ADMINISTRATOR: "SYSTEM_ADMIN",
+  };
 
-  return { role, userId };
+  return map[noUnderscore] || map[upper] || upper;
 }
 
-/* ✅ PO + RP + System can see all */
-function isAdminRole(role) {
+function getUser(req) {
+  const role = normalizeRole(req.headers["x-user-role"]);
+  if (!role) return { error: "Missing x-user-role" };
+  return { role };
+}
+
+function canReadAll(role) {
   return (
-    role === "ProcurementOfficer" ||
-    role === "ResourcePlanner" ||
-    role === "System"
+    role === "PROJECT_MANAGER" ||
+    role === "PROCUREMENT_OFFICER" ||
+    role === "RESOURCE_PLANNER" ||
+    role === "SYSTEM_ADMIN"
   );
 }
 
-/* ============================================================
-   VALIDATE REQUEST PAYLOAD
-============================================================ */
-function validatePayload(body) {
-  if (!body.title || body.title.trim() === "") return "Title is required";
-  if (!body.contractId || body.contractId.trim() === "")
-    return "contractId is required";
-  if (!body.contract || body.contract.trim() === "")
-    return "Contract name is required";
-  if (!Array.isArray(body.positions) || body.positions.length === 0)
-    return "At least one position is required";
-
-  for (let p of body.positions) {
-    if (!p.subContract || p.subContract.trim() === "") {
-      return "Each position must have a subContract";
-    }
-  }
-
-  return null;
+function canCreate(role) {
+  return role === "PROJECT_MANAGER";
 }
 
-/* ============================================================
-   SANITIZE: allow only editable fields
-============================================================ */
-function sanitizeRequest(body) {
-  return {
-    title: body.title,
-    contract: body.contract,
-    contractId: body.contractId, // string here, convert later
-
-    requestType: body.requestType || "Single",
-
-    positions: (body.positions || []).map((p) => ({
-      subContract: p.subContract,
-      role: p.role || p.subContract,
-      technology: p.technology || "",
-      experienceLevel: p.experienceLevel || "",
-      performanceLocation: p.performanceLocation || "Onshore",
-      startDate: p.startDate || "",
-      endDate: p.endDate || "",
-      manDays: Number(p.manDays) || 0,
-      hoursPerDay: Number(p.hoursPerDay) || 8,
-      employeesCount: Number(p.employeesCount) || 1,
-      offeredSalaryPerHour: Number(p.offeredSalaryPerHour) || 0,
-      taskDescription: p.taskDescription || "",
-      mustHaveSkills: Array.isArray(p.mustHaveSkills) ? p.mustHaveSkills : [],
-      niceToHaveSkills: Array.isArray(p.niceToHaveSkills)
-        ? p.niceToHaveSkills
-        : [],
-    })),
-
-    commercialWeighting: Number(body.commercialWeighting) || 50,
-    technicalWeighting: Number(body.technicalWeighting) || 50,
-
-    maxOffersPerProvider: Number(body.maxOffersPerProvider) || 3,
-    maxAcceptedOffers: Number(body.maxAcceptedOffers) || 1,
-
-    requiredLanguageSkills: Array.isArray(body.requiredLanguageSkills)
-      ? body.requiredLanguageSkills
-      : [],
-
-    sumOfManDays: Number(body.sumOfManDays) || 0,
-    totalEmployees: Number(body.totalEmployees) || 1,
-
-    externalId: body.externalId || "",
-    externalViewUrl: body.externalViewUrl || "",
-  };
-}
-
-/* ============================================================
-   RULE: Only PM can edit Draft request created by himself
-============================================================ */
-function canEditDraft(user, doc) {
-  if (!doc) return false;
-  if (user.role !== "ProjectManager") return false;
-  if (doc.status !== "Draft") return false;
-  if (!doc.createdBy) return false;
-  return String(doc.createdBy) === String(user.userId);
-}
-
-/* ============================================================
-   RULE: Who can read a request
-   - PO/RP/System can read all
-   - PM can read only his own
-============================================================ */
-function canRead(user, doc) {
-  if (!doc) return false;
-  if (isAdminRole(user.role)) return true;
-  if (user.role === "ProjectManager") {
-    return String(doc.createdBy) === String(user.userId);
-  }
-  return false;
-}
-
-/* ============================================================
-   CREATE SERVICE REQUEST
-   ✅ status Draft
-   ✅ createdBy = logged user
-============================================================ */
-router.post("/api/requests", async (req, res) => {
+// POST /api/requests
+router.post("/", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
 
-    if (user.role !== "ProjectManager") {
+    if (!canCreate(user.role)) {
       return res
         .status(403)
-        .json({ error: "Only ProjectManager can create requests" });
+        .json({ error: "Only PROJECT_MANAGER can create requests" });
     }
 
-    const body = req.body;
-
-    const err = validatePayload(body);
-    if (err) return res.status(400).json({ error: err });
-
-    let contractObjId;
-    try {
-      contractObjId = new ObjectId(body.contractId);
-    } catch {
-      return res.status(400).json({ error: "Invalid contractId" });
+    const body = req.body || {};
+    if (!body.title || !String(body.title).trim()) {
+      return res.status(400).json({ error: "Title is required" });
     }
-
-    const clean = sanitizeRequest(body);
 
     const doc = {
-      ...clean,
-      contractId: contractObjId,
-      createdBy: user.userId,
-      status: "Draft",
+      ...body,
+      status: "DRAFT",
       createdAt: new Date(),
       updatedAt: new Date(),
     };
 
     const result = await db.collection("requests").insertOne(doc);
-
-    return res.json({ success: true, requestId: result.insertedId });
-  } catch (error) {
-    console.error("Create request error:", error);
+    return res.json({ success: true, id: result.insertedId });
+  } catch (e) {
+    console.error("Create request error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-/* ============================================================
-   GET ALL REQUESTS
-   ✅ PM => only own requests
-   ✅ PO/RP/System => all requests
-============================================================ */
-router.get("/api/requests", async (req, res) => {
+// GET /api/requests
+router.get("/", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
 
-    const query =
-      user.role === "ProjectManager"
-        ? { createdBy: user.userId }
-        : isAdminRole(user.role)
-        ? {}
-        : null;
+    if (!canReadAll(user.role)) {
+      return res.status(403).json({ error: "Not allowed to view requests." });
+    }
 
-    if (!query) return res.status(403).json({ error: "Not allowed" });
+    const status = (req.query.status || "").toString().trim();
+    const query = status ? { status } : {};
 
     const list = await db
       .collection("requests")
@@ -204,19 +99,21 @@ router.get("/api/requests", async (req, res) => {
       .toArray();
 
     return res.json(list);
-  } catch (error) {
-    console.error("List requests error:", error);
+  } catch (e) {
+    console.error("List requests error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-/* ============================================================
-   GET ONE REQUEST
-============================================================ */
-router.get("/api/requests/:id", async (req, res) => {
+// GET /api/requests/:id
+router.get("/:id", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
+
+    if (!canReadAll(user.role)) {
+      return res.status(403).json({ error: "Not allowed to view requests." });
+    }
 
     let id;
     try {
@@ -228,27 +125,24 @@ router.get("/api/requests/:id", async (req, res) => {
     const doc = await db.collection("requests").findOne({ _id: id });
     if (!doc) return res.status(404).json({ error: "Request not found" });
 
-    if (!canRead(user, doc)) {
-      return res
-        .status(403)
-        .json({ error: "Not allowed to view this request" });
-    }
-
     return res.json(doc);
-  } catch (error) {
-    console.error("Load request error:", error);
+  } catch (e) {
+    console.error("Load request error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-/* ============================================================
-   UPDATE REQUEST
-   ✅ Only owner PM can edit Draft
-============================================================ */
-router.put("/api/requests/:id", async (req, res) => {
+// PUT /api/requests/:id
+router.put("/:id", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
+
+    if (!canCreate(user.role)) {
+      return res
+        .status(403)
+        .json({ error: "Only PROJECT_MANAGER can update requests" });
+    }
 
     let id;
     try {
@@ -257,53 +151,38 @@ router.put("/api/requests/:id", async (req, res) => {
       return res.status(400).json({ error: "Invalid request id" });
     }
 
-    const body = req.body;
-
     const existing = await db.collection("requests").findOne({ _id: id });
     if (!existing) return res.status(404).json({ error: "Request not found" });
 
-    if (!canEditDraft(user, existing)) {
-      return res.status(403).json({
-        error: "Not allowed. Only owner PM can edit Draft requests.",
-      });
+    if (String(existing.status || "").toUpperCase() !== "DRAFT") {
+      return res
+        .status(403)
+        .json({ error: "Only DRAFT requests can be edited" });
     }
 
-    const err = validatePayload(body);
-    if (err) return res.status(400).json({ error: err });
-
-    let contractObjId;
-    try {
-      contractObjId = new ObjectId(body.contractId);
-    } catch {
-      return res.status(400).json({ error: "Invalid contractId" });
-    }
-
-    const clean = sanitizeRequest(body);
-
-    const update = {
-      ...clean,
-      contractId: contractObjId,
-      updatedAt: new Date(),
-    };
-
-    await db.collection("requests").updateOne({ _id: id }, { $set: update });
+    await db
+      .collection("requests")
+      .updateOne({ _id: id }, { $set: { ...req.body, updatedAt: new Date() } });
 
     const updated = await db.collection("requests").findOne({ _id: id });
     return res.json(updated);
-  } catch (error) {
-    console.error("Update request error:", error);
+  } catch (e) {
+    console.error("Update request error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-/* ============================================================
-   DELETE REQUEST
-   ✅ Only owner PM can delete Draft
-============================================================ */
-router.delete("/api/requests/:id", async (req, res) => {
+// DELETE /api/requests/:id
+router.delete("/:id", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
+
+    if (!canCreate(user.role)) {
+      return res
+        .status(403)
+        .json({ error: "Only PROJECT_MANAGER can delete requests" });
+    }
 
     let id;
     try {
@@ -315,16 +194,16 @@ router.delete("/api/requests/:id", async (req, res) => {
     const existing = await db.collection("requests").findOne({ _id: id });
     if (!existing) return res.status(404).json({ error: "Request not found" });
 
-    if (!canEditDraft(user, existing)) {
-      return res.status(403).json({
-        error: "Not allowed. Only owner PM can delete Draft requests.",
-      });
+    if (String(existing.status || "").toUpperCase() !== "DRAFT") {
+      return res
+        .status(403)
+        .json({ error: "Only DRAFT requests can be deleted" });
     }
 
     await db.collection("requests").deleteOne({ _id: id });
     return res.json({ success: true });
-  } catch (error) {
-    console.error("Delete request error:", error);
+  } catch (e) {
+    console.error("Delete request error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });

@@ -1,4 +1,4 @@
-// routes/auth.js  (STYLE A: server mounts /api/auth, router uses short paths)
+// routes/auth.js
 import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -15,9 +15,7 @@ const EMPLOYEES_API =
 const EMPLOYEES_API_TIMEOUT_MS = 8000;
 
 const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  throw new Error("Missing JWT_SECRET");
-}
+if (!JWT_SECRET) throw new Error("Missing JWT_SECRET");
 
 const ALLOWED_EMPLOYEE_ROLES = new Set([
   "PROJECT_MANAGER",
@@ -26,9 +24,6 @@ const ALLOWED_EMPLOYEE_ROLES = new Set([
   "SYSTEM_ADMIN",
 ]);
 
-/* =========================
-   Helpers
-========================= */
 function normalizeEmail(email) {
   return String(email || "")
     .trim()
@@ -42,7 +37,8 @@ function normalizeUsername(username) {
 function normalizeRole(role) {
   return String(role || "")
     .trim()
-    .toUpperCase();
+    .toUpperCase()
+    .replace(/\s+/g, "_");
 }
 
 function safeUser(u) {
@@ -83,16 +79,16 @@ function buildFullName(employee) {
   const full = `${fn} ${ln}`.trim();
   return full || String(employee?.username || "").trim() || "User";
 }
+
 function pickEmployeeUsername(employee) {
   return String(employee?.username || "").trim();
 }
+
 function pickEmployeeId(employee) {
   return employee?.id || employee?._id || employee?.employeeId || null;
 }
 
-/* =========================
-   Employees fetch (XML -> JS)
-========================= */
+// XML parser
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "",
@@ -105,26 +101,23 @@ async function getEmployees() {
     () => controller.abort(),
     EMPLOYEES_API_TIMEOUT_MS,
   );
+
   let res;
   try {
     res = await fetch(EMPLOYEES_API, {
       headers: { Accept: "application/xml, text/xml, application/json" },
       signal: controller.signal,
     });
-  } catch (err) {
-    if (err?.name === "AbortError") {
-      throw new Error("Employees API timeout");
-    }
-    throw err;
   } finally {
     clearTimeout(timeoutId);
   }
+
   if (!res.ok) throw new Error(`Employees API failed: ${res.status}`);
 
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
   const raw = await res.text();
 
-  // JSON fallback
+  // JSON
   if (contentType.includes("application/json")) {
     const json = JSON.parse(raw);
     const employees = Array.isArray(json) ? json : json?.data;
@@ -132,75 +125,34 @@ async function getEmployees() {
     return employees;
   }
 
-  // XML parse
+  // XML
   const parsed = xmlParser.parse(raw);
   const items = parsed?.List?.item;
   const employees = Array.isArray(items) ? items : items ? [items] : [];
-  if (!Array.isArray(employees)) throw new Error("Employees XML invalid");
   return employees;
 }
 
 async function findEmployeeByEmail(email) {
-  const normEmail = normalizeEmail(email);
   const employees = await getEmployees();
+  const normEmail = normalizeEmail(email);
   return employees.find((e) => normalizeEmail(e?.email) === normEmail) || null;
 }
 
-/* ============================================================
-   ROUTES (server mounts: /api/auth)
-============================================================ */
-
-/**
- * @openapi
- * /api/auth/prefill:
- *   get:
- *     summary: Verify employee email and prefill user info
- *     tags: [Auth]
- *     parameters:
- *       - in: query
- *         name: email
- *         required: true
- *         schema: { type: string, example: "john.doe@workforce.com" }
- *     responses:
- *       200:
- *         description: Prefill data
- *       403:
- *         description: Unauthorized email/role
- *       503:
- *         description: Employees service unavailable
- */
-router.get("/api/auth/prefill", async (req, res) => {
+// ✅ GET /api/auth/prefill
+router.get("/prefill", async (req, res) => {
   try {
     const email = req.query.email;
     if (!email) return res.status(400).json({ error: "Email is required" });
 
-    let employee;
-    try {
-      employee = await findEmployeeByEmail(email);
-    } catch (e) {
-      console.error("Employees API error:", e);
-      return res.status(503).json({ error: "Employees service unavailable" });
-    }
-
-    if (!employee) {
-      return res
-        .status(403)
-        .json({ error: "Unauthorized to register for this system." });
-    }
+    const employee = await findEmployeeByEmail(email);
+    if (!employee) return res.status(403).json({ error: "Unauthorized." });
 
     const role = normalizeRole(employee?.role);
-    if (!ALLOWED_EMPLOYEE_ROLES.has(role)) {
-      return res.status(403).json({
-        error: "Unauthorized to register for this system.",
-      });
-    }
+    if (!ALLOWED_EMPLOYEE_ROLES.has(role))
+      return res.status(403).json({ error: "Unauthorized." });
 
     const username = pickEmployeeUsername(employee);
-    if (!username) {
-      return res
-        .status(403)
-        .json({ error: "Unauthorized to register for this system." });
-    }
+    if (!username) return res.status(403).json({ error: "Unauthorized." });
 
     return res.json({
       email: normalizeEmail(employee?.email),
@@ -220,62 +172,25 @@ router.get("/api/auth/prefill", async (req, res) => {
   }
 });
 
-/**
- * @openapi
- * /api/auth/register:
- *   post:
- *     summary: Register by email + password (username auto from employee system)
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [email, password]
- *             properties:
- *               email: { type: string, example: "john.doe@workforce.com" }
- *               password: { type: string, example: "1234" }
- *     responses:
- *       200: { description: Registered }
- *       400: { description: Validation / already registered }
- *       403: { description: Not allowed }
- *       503: { description: Employees service unavailable }
- */
-router.post("/api/auth/register", async (req, res) => {
+// ✅ POST /api/auth/register
+router.post("/register", async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required" });
     }
 
-    let employee;
-    try {
-      employee = await findEmployeeByEmail(email);
-    } catch (e) {
-      console.error("Employees API error:", e);
-      return res.status(503).json({ error: "Employees service unavailable" });
-    }
-
-    if (!employee) {
-      return res.status(403).json({
-        error: "Registration denied. You are not authorized to register.",
-      });
-    }
+    const employee = await findEmployeeByEmail(email);
+    if (!employee)
+      return res.status(403).json({ error: "Registration denied." });
 
     const role = normalizeRole(employee?.role);
-    if (!ALLOWED_EMPLOYEE_ROLES.has(role)) {
-      return res.status(403).json({
-        error: "Registration denied. You are not authorized to register.",
-      });
-    }
+    if (!ALLOWED_EMPLOYEE_ROLES.has(role))
+      return res.status(403).json({ error: "Registration denied." });
 
     const usernameRaw = pickEmployeeUsername(employee);
-    if (!usernameRaw) {
-      return res
-        .status(403)
-        .json({ error: "Registration denied. You are not authorized to register." });
-    }
+    if (!usernameRaw)
+      return res.status(403).json({ error: "Registration denied." });
 
     const username = normalizeUsername(usernameRaw);
     const normEmail = normalizeEmail(email);
@@ -283,11 +198,8 @@ router.post("/api/auth/register", async (req, res) => {
     const existing = await db.collection("users").findOne({
       $or: [{ email: normEmail }, { username }],
     });
-    if (existing) {
-      return res.status(400).json({
-        error: "User already registered (email/username already exists).",
-      });
-    }
+    if (existing)
+      return res.status(400).json({ error: "User already registered." });
 
     const hashed = await bcrypt.hash(password, 10);
 
@@ -296,16 +208,13 @@ router.post("/api/auth/register", async (req, res) => {
       username,
       displayUsername: usernameRaw,
       role,
-
       name: buildFullName(employee),
       firstName: employee?.firstName || "",
       lastName: employee?.lastName || "",
       department: employee?.department || "",
       position: employee?.position || "",
-
       employeeId: pickEmployeeId(employee),
       userId: employee?.userId || null,
-
       password: hashed,
       createdAt: new Date(),
     };
@@ -326,27 +235,8 @@ router.post("/api/auth/register", async (req, res) => {
   }
 });
 
-/**
- * @openapi
- * /api/auth/login:
- *   post:
- *     summary: Login with username + password
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [username, password]
- *             properties:
- *               username: { type: string, example: "pm_john" }
- *               password: { type: string, example: "1234" }
- *     responses:
- *       200: { description: Logged in }
- *       400: { description: Invalid username or password }
- */
-router.post("/api/auth/login", async (req, res) => {
+// ✅ POST /api/auth/login
+router.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (!username || !password) {
@@ -354,7 +244,6 @@ router.post("/api/auth/login", async (req, res) => {
     }
 
     const normUsername = normalizeUsername(username);
-
     const user = await db
       .collection("users")
       .findOne({ username: normUsername });
@@ -378,28 +267,8 @@ router.post("/api/auth/login", async (req, res) => {
   }
 });
 
-/**
- * @openapi
- * /api/auth/change-password:
- *   post:
- *     summary: Change password for current user (requires Bearer token)
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [oldPassword, newPassword]
- *             properties:
- *               username: { type: string }
- *               oldPassword: { type: string }
- *               newPassword: { type: string }
- *     responses:
- *       200: { description: Password updated }
- *       400: { description: Validation error }
- */
-router.post("/api/auth/change-password", authMiddleware, async (req, res) => {
+// ✅ POST /api/auth/change-password
+router.post("/change-password", authMiddleware, async (req, res) => {
   try {
     const { username, oldPassword, newPassword } = req.body || {};
     if (!oldPassword || !newPassword) {
@@ -409,30 +278,22 @@ router.post("/api/auth/change-password", authMiddleware, async (req, res) => {
     }
 
     const tokenUsername = normalizeUsername(req.user?.username);
-    if (!tokenUsername) {
+    if (!tokenUsername)
       return res.status(401).json({ error: "Token invalid or expired" });
-    }
 
-    const bodyUsername = username
-      ? normalizeUsername(username)
-      : tokenUsername;
-    if (bodyUsername !== tokenUsername) {
+    const bodyUsername = username ? normalizeUsername(username) : tokenUsername;
+    if (bodyUsername !== tokenUsername)
       return res.status(403).json({ error: "Not authorized" });
-    }
 
     const user = await db
       .collection("users")
       .findOne({ username: tokenUsername });
-    if (!user) {
-      return res.status(400).json({ error: "Invalid credentials" });
-    }
+    if (!user) return res.status(400).json({ error: "Invalid credentials" });
 
     const match = await bcrypt.compare(oldPassword, user.password);
-    if (!match)
-      return res.status(400).json({ error: "Invalid credentials" });
+    if (!match) return res.status(400).json({ error: "Invalid credentials" });
 
     const hashed = await bcrypt.hash(newPassword, 10);
-
     await db
       .collection("users")
       .updateOne({ username: tokenUsername }, { $set: { password: hashed } });
