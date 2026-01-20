@@ -11,6 +11,7 @@ function normalizeRole(raw) {
     .toUpperCase()
     .replace(/\s+/g, "_");
 }
+
 function normalizeUsername(raw) {
   return String(raw || "")
     .trim()
@@ -27,20 +28,17 @@ function parseId(idStr) {
 
 /**
  * GET /api/notifications
- * Returns notifications for:
- *  - user (toUsername)
- *  - or role-wide (roles: [ROLE])
+ * Personal + role-based notifications
  */
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    const role = normalizeRole(req.user?.role);
-    const username = normalizeUsername(req.user?.username);
+    const role = normalizeRole(req.user.role);
+    const username = normalizeUsername(req.user.username);
 
-    // ✅ supports both personal + role notifications
     const query = {
       $or: [
-        { toUsername: username },
-        { roles: role }, // optional for global/role announcements
+        { toUsername: username }, // ✅ personal
+        { roles: role }, // ✅ role-wide (optional)
       ],
     };
 
@@ -51,10 +49,10 @@ router.get("/", authMiddleware, async (req, res) => {
       .limit(100)
       .toArray();
 
-    return res.json({ notifications });
+    res.json({ notifications });
   } catch (err) {
     console.error("Notifications error:", err);
-    return res.status(500).json({ error: "Error fetching notifications" });
+    res.status(500).json({ error: "Error fetching notifications" });
   }
 });
 
@@ -63,48 +61,50 @@ router.get("/", authMiddleware, async (req, res) => {
  */
 router.get("/unread-count", authMiddleware, async (req, res) => {
   try {
-    const role = normalizeRole(req.user?.role);
-    const username = normalizeUsername(req.user?.username);
+    const role = normalizeRole(req.user.role);
+    const username = normalizeUsername(req.user.username);
 
-    const query = {
+    const count = await db.collection("notifications").countDocuments({
       read: false,
       $or: [{ toUsername: username }, { roles: role }],
-    };
+    });
 
-    const count = await db.collection("notifications").countDocuments(query);
-    return res.json({ unreadCount: count });
+    res.json({ unreadCount: count });
   } catch (err) {
     console.error("Unread count error:", err);
-    return res.status(500).json({ error: "Error fetching unread count" });
+    res.status(500).json({ error: "Error fetching unread count" });
   }
 });
 
 /**
  * POST /api/notifications/:id/read
- * Mark one as read
  */
 router.post("/:id/read", authMiddleware, async (req, res) => {
   try {
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid id" });
 
-    const role = normalizeRole(req.user?.role);
-    const username = normalizeUsername(req.user?.username);
+    const role = normalizeRole(req.user.role);
+    const username = normalizeUsername(req.user.username);
 
-    // ✅ only allow marking your own / your role notifications
-    const query = {
-      _id: id,
-      $or: [{ toUsername: username }, { roles: role }],
-    };
+    const result = await db.collection("notifications").updateOne(
+      {
+        _id: id,
+        $or: [{ toUsername: username }, { roles: role }],
+      },
+      {
+        $set: { read: true, readAt: new Date() },
+      },
+    );
 
-    await db.collection("notifications").updateOne(query, {
-      $set: { read: true, readAt: new Date() },
-    });
+    if (!result.matchedCount) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
 
-    return res.json({ success: true });
+    res.json({ success: true });
   } catch (err) {
     console.error("Mark read error:", err);
-    return res.status(500).json({ error: "Error updating notification" });
+    res.status(500).json({ error: "Error updating notification" });
   }
 });
 
