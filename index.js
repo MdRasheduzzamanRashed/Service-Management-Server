@@ -139,7 +139,23 @@ app.use("/api/requests", requestsRoutes);
    Socket + Listen
 ========================= */
 initSocket(server);
+// ✅ Swagger UI
+app.use(
+  "/api-docs",
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec, {
+    explorer: true,
+    swaggerOptions: {
+      persistAuthorization: true,
+    },
+  }),
+);
 
+// ✅ also expose raw json (helps debugging)
+app.get("/api-docs.json", (req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  res.send(swaggerSpec);
+});
 server.listen(PORT, () => {
   console.log("Backend listening on port", PORT);
 });

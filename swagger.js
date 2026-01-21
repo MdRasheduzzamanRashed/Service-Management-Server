@@ -1,15 +1,26 @@
-import swaggerJSDoc from "swagger-jsdoc";
-import path from "path";
-import { fileURLToPath } from "url";
+// swagger.js
+import swaggerJsdoc from "swagger-jsdoc";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const PORT = process.env.PORT || 8000;
 
-export const swaggerSpec = swaggerJSDoc({
+// ✅ Render provides this sometimes; fallback to localhost
+const PROD_URL = process.env.PUBLIC_BASE_URL; // example: https://service-management-server.onrender.com
+const LOCAL_URL = `http://localhost:${PORT}`;
+
+export const swaggerSpec = swaggerJsdoc({
   definition: {
     openapi: "3.0.0",
-    info: { title: "Backend API", version: "1.0.0" },
-    servers: [{ url: "http://localhost:8000", description: "Local" }],
+    info: {
+      title: "Service Management API",
+      version: "1.0.0",
+    },
+    servers: [{ url: PROD_URL || LOCAL_URL }, { url: LOCAL_URL }],
+    components: {
+      securitySchemes: {
+        bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+      },
+    },
+    security: [{ bearerAuth: [] }],
   },
-  apis: [path.join(__dirname, "routes", "*.js")],
+  apis: ["./routes/*.js"], // must match your project structure
 });

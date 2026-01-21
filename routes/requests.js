@@ -218,6 +218,30 @@ router.get("/", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+// ✅ GET /api/requests/bidding
+// Returns all requests with status = BIDDING
+router.get("/bidding", async (req, res) => {
+  try {
+    const user = getUser(req);
+    if (user.error) return res.status(401).json({ error: user.error });
+
+    // allowed roles (same as list)
+    if (!canReadAll(user.role)) {
+      return res.status(403).json({ error: "Not allowed to view requests." });
+    }
+
+    const list = await db
+      .collection("requests")
+      .find({ status: STATUS.BIDDING })
+      .sort({ biddingStartedAt: -1, createdAt: -1 })
+      .toArray();
+
+    return res.json(list);
+  } catch (e) {
+    console.error("List bidding requests error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
 
 /* ================================
    GET ONE (includes expiry safety)
