@@ -13,7 +13,7 @@ import mockOffersRoutes from "./routes/mockOffers.js";
 import authRoutes from "./routes/auth.js";
 import requestsRoutes from "./routes/requests.js";
 import offersRoutes from "./routes/offers.js";
-import biddingRoutes from "./routes/biddingResults.js";
+import biddingRoutes from "./routes/bidding.js";
 import purchaseOrdersRoutes from "./routes/purchaseOrders.js";
 
 dotenv.config();

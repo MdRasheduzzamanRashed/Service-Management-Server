@@ -18,9 +18,14 @@ const STATUS = {
   IN_REVIEW: "IN_REVIEW",
   APPROVED_FOR_SUBMISSION: "APPROVED_FOR_SUBMISSION",
   BIDDING: "BIDDING",
+  BID_EVALUATION: "BID_EVALUATION", // ✅ new
+  RECOMMENDED: "RECOMMENDED", // ✅ new
+  SENT_TO_PO: "SENT_TO_PO", // ✅ new
+  ORDERED: "ORDERED", // ✅ new
   REJECTED: "REJECTED",
   EXPIRED: "EXPIRED",
 };
+
 
 // ---------- auth helpers ----------
 function normalizeRole(raw) {
@@ -1134,14 +1139,97 @@ router.post("/:id/reactivate", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+function isRP(role) {
+  return role === "RESOURCE_PLANNER";
+}
+function isPO(role) {
+  return role === "PROCUREMENT_OFFICER";
+}
 
-// PM: RECOMMENDED -> SENT_TO_PO
+// ✅ RP: Recommend best offer
+router.post("/:id/rp-recommend-offer", async (req, res) => {
+  try {
+    const user = getUser(req);
+    if (user.error) return res.status(401).json({ error: user.error });
+    if (!isRP(user.role))
+      return res
+        .status(403)
+        .json({ error: "Only RESOURCE_PLANNER can recommend" });
+    if (!user.username)
+      return res.status(401).json({ error: "Missing x-username" });
+
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid request id" });
+
+    const doc = await db.collection("requests").findOne({ _id: id });
+    if (!doc) return res.status(404).json({ error: "Request not found" });
+
+    const st = String(doc.status || "").toUpperCase();
+    if (!["BID_EVALUATION", "EXPIRED", "BIDDING"].includes(st)) {
+      return res
+        .status(403)
+        .json({ error: "Request not in recommendable state" });
+    }
+
+    const offerId = String(req.body?.offerId || "").trim();
+    if (!offerId) return res.status(400).json({ error: "offerId is required" });
+
+    const offer = await db
+      .collection("offers")
+      .findOne({ _id: new ObjectId(offerId) });
+    if (!offer) return res.status(404).json({ error: "Offer not found" });
+    if (String(offer.requestId) !== String(doc._id)) {
+      return res
+        .status(403)
+        .json({ error: "Offer does not belong to this request" });
+    }
+
+    await db
+      .collection("offers")
+      .updateOne(
+        { _id: new ObjectId(offerId) },
+        { $set: { status: "RECOMMENDED", updatedAt: new Date() } },
+      );
+
+    await db.collection("requests").updateOne(
+      { _id: id },
+      {
+        $set: {
+          status: STATUS.RECOMMENDED,
+          recommendedOfferId: offerId,
+          recommendedAt: new Date(),
+          recommendedBy: user.username,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    // notify PM owner
+    if (doc.createdBy) {
+      await db.collection("notifications").insertOne({
+        toUsername: normalizeUsername(doc.createdBy),
+        type: "OFFER_RECOMMENDED",
+        title: "Offer recommended",
+        message: `RP recommended an offer for "${doc.title || "Untitled"}".`,
+        requestId: String(doc._id),
+        createdAt: new Date(),
+        read: false,
+      });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("rp-recommend-offer error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ✅ PM: RECOMMENDED -> SENT_TO_PO
 router.post("/:id/send-to-po", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-
-    if (!isPM(user.role)) return res.status(403).json({ error: "Only PROJECT_MANAGER can send to PO" });
+    if (!isPM(user.role)) return res.status(403).json({ error: "Only PROJECT_MANAGER" });
     if (!user.username) return res.status(401).json({ error: "Missing x-username" });
 
     const id = parseId(req.params.id);
@@ -1151,13 +1239,32 @@ router.post("/:id/send-to-po", async (req, res) => {
     if (!doc) return res.status(404).json({ error: "Request not found" });
     if (!isOwner(doc, user.username)) return res.status(403).json({ error: "Not allowed" });
 
-    const st = String(doc.status || "").toUpperCase();
-    if (st !== "RECOMMENDED") return res.status(403).json({ error: "Only RECOMMENDED can be sent to PO" });
+    if (String(doc.status || "").toUpperCase() !== STATUS.RECOMMENDED) {
+      return res.status(403).json({ error: "Only RECOMMENDED can be sent to PO" });
+    }
 
     await db.collection("requests").updateOne(
-      { _id: id, status: "RECOMMENDED" },
-      { $set: { status: "SENT_TO_PO", sentToPoAt: new Date(), sentToPoBy: user.username, updatedAt: new Date() } }
+      { _id: id, status: STATUS.RECOMMENDED },
+      {
+        $set: {
+          status: STATUS.SENT_TO_PO,
+          sentToPoAt: new Date(),
+          sentToPoBy: user.username,
+          updatedAt: new Date(),
+        },
+      }
     );
+
+    // notify PO role (role-based)
+    await db.collection("notifications").insertOne({
+      toRole: "PROCUREMENT_OFFICER",
+      type: "REQUEST_SENT_TO_PO",
+      title: "New request for ordering",
+      message: `A request "${doc.title || "Untitled"}" is ready for ordering.`,
+      requestId: String(doc._id),
+      createdAt: new Date(),
+      read: false,
+    });
 
     return res.json({ success: true });
   } catch (e) {
@@ -1165,6 +1272,83 @@ router.post("/:id/send-to-po", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+
+// ✅ PO: SENT_TO_PO -> ORDERED + create purchase order
+router.post("/:id/order", async (req, res) => {
+  try {
+    const user = getUser(req);
+    if (user.error) return res.status(401).json({ error: user.error });
+    if (!isPO(user.role)) return res.status(403).json({ error: "Only PROCUREMENT_OFFICER" });
+    if (!user.username) return res.status(401).json({ error: "Missing x-username" });
+
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid request id" });
+
+    const doc = await db.collection("requests").findOne({ _id: id });
+    if (!doc) return res.status(404).json({ error: "Request not found" });
+
+    if (String(doc.status || "").toUpperCase() !== STATUS.SENT_TO_PO) {
+      return res.status(403).json({ error: "Only SENT_TO_PO can be ordered" });
+    }
+
+    const offerId = String(req.body?.offerId || doc.recommendedOfferId || "").trim();
+    if (!offerId) return res.status(400).json({ error: "offerId missing (no recommended offer)" });
+
+    const offer = await db.collection("offers").findOne({ _id: new ObjectId(offerId) });
+    if (!offer) return res.status(404).json({ error: "Offer not found" });
+
+    const po = {
+      requestId: String(doc._id),
+      offerId,
+      orderedBy: user.username,
+      orderedAt: new Date(),
+      totalPrice: offer.price ?? null,
+      currency: offer.currency || "EUR",
+      providerUsername: offer.providerUsername,
+      rolesProvided: offer.rolesProvided || [],
+      createdAt: new Date(),
+    };
+
+    const r = await db.collection("purchase_orders").insertOne(po);
+
+    await db.collection("offers").updateOne(
+      { _id: new ObjectId(offerId) },
+      { $set: { status: "ORDERED", updatedAt: new Date() } }
+    );
+
+    await db.collection("requests").updateOne(
+      { _id: id },
+      {
+        $set: {
+          status: STATUS.ORDERED,
+          orderId: String(r.insertedId),
+          orderedAt: new Date(),
+          orderedBy: user.username,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    // notify PM owner
+    if (doc.createdBy) {
+      await db.collection("notifications").insertOne({
+        toUsername: normalizeUsername(doc.createdBy),
+        type: "REQUEST_ORDERED",
+        title: "Order placed",
+        message: `PO placed an order for "${doc.title || "Untitled"}".`,
+        requestId: String(doc._id),
+        createdAt: new Date(),
+        read: false,
+      });
+    }
+
+    return res.json({ success: true, orderId: String(r.insertedId) });
+  } catch (e) {
+    console.error("order error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 
 
 export default router;
