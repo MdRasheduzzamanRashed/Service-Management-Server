@@ -436,13 +436,6 @@ router.get("/", async (req, res) => {
  */
 router.get("/bidding", async (req, res) => {
   try {
-    const user = getUser(req);
-    if (user.error) return res.status(401).json({ error: user.error });
-
-    if (!canReadAll(user.role)) {
-      return res.status(403).json({ error: "Not allowed to view requests." });
-    }
-
     const list = await db
       .collection("requests")
       .find({ status: STATUS.BIDDING })
