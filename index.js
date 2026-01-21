@@ -24,21 +24,16 @@ const PORT = process.env.PORT || 8000;
 const allowlist = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  process.env.CLIENT_URL, // e.g. https://your-frontend.vercel.app
+  process.env.CLIENT_URL,
 ].filter(Boolean);
 
 const corsOptions = {
   origin(origin, cb) {
-    // allow Postman/curl (no origin)
     if (!origin) return cb(null, true);
-
-    // allow exact matches
     if (allowlist.includes(origin)) return cb(null, true);
-
-    // IMPORTANT: don't throw Error here (it causes missing CORS headers)
-    return cb(null, false);
+    return cb(new Error("CORS blocked: " + origin), false);
   },
-  credentials: false,
+  credentials: true, // ✅ MUST be true
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
@@ -49,9 +44,8 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // ✅ IMPORTANT
 
-// ✅ preflight must use SAME corsOptions
-app.options("*", cors(corsOptions));
 
 app.use("/api/notifications", notificationsRoutes);
 /* =========================
