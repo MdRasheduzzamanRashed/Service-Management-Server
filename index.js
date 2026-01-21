@@ -4,7 +4,7 @@ import http from "http";
 import cors from "cors";
 import dotenv from "dotenv";
 import swaggerUi from "swagger-ui-express";
-
+import notificationsRoutes from "./routes/notifications.js";
 import { connectDB } from "./db.js";
 import { db } from "./db.js";
 import { swaggerSpec } from "./swagger.js";
@@ -53,7 +53,7 @@ app.use(cors(corsOptions));
 // ✅ preflight must use SAME corsOptions
 app.options("*", cors(corsOptions));
 
-
+app.use("/api/notifications", notificationsRoutes);
 /* =========================
    ✅ Body parser (before routes)
 ========================= */

@@ -5,28 +5,31 @@ let ioInstance = null;
 export function initSocket(server) {
   ioInstance = new Server(server, {
     cors: {
-      origin: "http://localhost:3000",
+      origin: ["http://localhost:3000", process.env.CLIENT_URL].filter(Boolean),
       methods: ["GET", "POST"],
-      credentials: true
-    }
+      credentials: false, // ✅ MUST match Express CORS
+    },
   });
 
   ioInstance.on("connection", (socket) => {
-    console.log("Socket connected:", socket.id);
+    console.log("🔌 Socket connected:", socket.id);
 
-    socket.on("register", ({ role, email }) => {
+    socket.on("register", ({ role, username }) => {
       if (role) {
-        socket.join(`role:${role}`);
-        console.log(`Socket ${socket.id} joined room role:${role}`);
+        const r = String(role).toUpperCase();
+        socket.join(`role:${r}`);
+        console.log(`➡️ ${socket.id} joined role:${r}`);
       }
-      if (email) {
-        socket.join(`user:${email}`);
-        console.log(`Socket ${socket.id} joined room user:${email}`);
+
+      if (username) {
+        const u = String(username).toLowerCase();
+        socket.join(`user:${u}`);
+        console.log(`➡️ ${socket.id} joined user:${u}`);
       }
     });
 
     socket.on("disconnect", () => {
-      console.log("Socket disconnected:", socket.id);
+      console.log("❌ Socket disconnected:", socket.id);
     });
   });
 
