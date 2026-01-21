@@ -434,20 +434,36 @@ router.get("/", async (req, res) => {
  *       500:
  *         description: Server error
  */
-router.get("/bidding", async (req, res) => {
+router.get("/bidding/open", async (req, res) => {
   try {
     const list = await db
       .collection("requests")
-      .find({ status: STATUS.BIDDING })
+      .find({ status: "BIDDING" })
       .sort({ biddingStartedAt: -1, createdAt: -1 })
+      .project({
+        title: 1,
+        status: 1,
+        createdAt: 1,
+        biddingStartedAt: 1,
+        biddingCycleDays: 1,
+        maxOffers: 1,
+        roles: 1,
+        requiredLanguages: 1,
+        mustHaveCriteria: 1,
+        niceToHaveCriteria: 1,
+        performanceLocation: 1,
+        startDate: 1,
+        endDate: 1,
+      })
       .toArray();
 
     return res.json(list);
   } catch (e) {
-    console.error("List bidding requests error:", e);
+    console.error("Public bidding open error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 
 /* ================================
    GET ONE (includes expiry safety)
@@ -1118,5 +1134,37 @@ router.post("/:id/reactivate", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+
+// PM: RECOMMENDED -> SENT_TO_PO
+router.post("/:id/send-to-po", async (req, res) => {
+  try {
+    const user = getUser(req);
+    if (user.error) return res.status(401).json({ error: user.error });
+
+    if (!isPM(user.role)) return res.status(403).json({ error: "Only PROJECT_MANAGER can send to PO" });
+    if (!user.username) return res.status(401).json({ error: "Missing x-username" });
+
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid request id" });
+
+    const doc = await db.collection("requests").findOne({ _id: id });
+    if (!doc) return res.status(404).json({ error: "Request not found" });
+    if (!isOwner(doc, user.username)) return res.status(403).json({ error: "Not allowed" });
+
+    const st = String(doc.status || "").toUpperCase();
+    if (st !== "RECOMMENDED") return res.status(403).json({ error: "Only RECOMMENDED can be sent to PO" });
+
+    await db.collection("requests").updateOne(
+      { _id: id, status: "RECOMMENDED" },
+      { $set: { status: "SENT_TO_PO", sentToPoAt: new Date(), sentToPoBy: user.username, updatedAt: new Date() } }
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("send-to-po error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 
 export default router;

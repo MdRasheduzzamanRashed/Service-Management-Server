@@ -22,6 +22,7 @@ const ALLOWED_EMPLOYEE_ROLES = new Set([
   "RESOURCE_PLANNER",
   "PROCUREMENT_OFFICER",
   "SYSTEM_ADMIN",
+  "SERVICE_PROVIDER",
 ]);
 
 function normalizeEmail(email) {

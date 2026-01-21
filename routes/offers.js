@@ -1,129 +1,195 @@
+// routes/offers.js
 import express from "express";
 import { ObjectId } from "mongodb";
 import { db } from "../db.js";
-import { createNotification } from "../utils/createNotification.js";
 
 const router = express.Router();
 
-// GET all offers for a request
-router.get("/api/offers/:requestId", async (req, res) => {
+const OFFER_STATUS = {
+  SUBMITTED: "SUBMITTED",
+  RECOMMENDED: "RECOMMENDED",
+  ORDERED: "ORDERED",
+};
+
+function normalizeRole(raw) {
+  return String(raw || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "_");
+}
+function normalizeUsername(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase();
+}
+function getUser(req) {
+  // you already use x-user-role / x-username in requests.js
+  const role = normalizeRole(req.headers["x-user-role"]);
+  const username = normalizeUsername(req.headers["x-username"]);
+  return { role, username };
+}
+function isSP(role) {
+  return role === "SERVICE_PROVIDER";
+}
+function isRP(role) {
+  return role === "RESOURCE_PLANNER";
+}
+function isPM(role) {
+  return role === "PROJECT_MANAGER";
+}
+function isPO(role) {
+  return role === "PROCUREMENT_OFFICER";
+}
+function canReadOffers(role) {
+  return isPM(role) || isRP(role) || isPO(role) || isSP(role);
+}
+function parseId(idStr) {
   try {
-    let requestId;
-    try {
-      requestId = new ObjectId(req.params.requestId);
-    } catch {
-      return res.status(400).json({ error: "Invalid request id" });
-    }
-
-    const offers = await db
-      .collection("offers")
-      .find({ requestId })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    return res.json(offers);
-  } catch (err) {
-    console.error("Get offers error:", err);
-    return res.status(500).json({ error: "Server error" });
+    return new ObjectId(idStr);
+  } catch {
+    return null;
   }
-});
+}
 
-// POST: Provider submits offer
-router.post("/api/offers/:requestId", async (req, res) => {
+/**
+ * POST /api/offers
+ * SP submits an offer for a bidding request
+ * body: { requestId, price, currency, deliveryDays, note, rolesProvided: [...] }
+ */
+router.post("/", async (req, res) => {
   try {
-    const { providerName, price, currency, notes } = req.body;
+    const { role, username } = getUser(req);
+    if (!role) return res.status(401).json({ error: "Missing x-user-role" });
+    if (!isSP(role))
+      return res
+        .status(403)
+        .json({ error: "Only SERVICE_PROVIDER can submit offers" });
+    if (!username) return res.status(401).json({ error: "Missing x-username" });
 
-    if (!providerName || price == null) {
-      return res.status(400).json({ error: "providerName and price required" });
-    }
+    const body = req.body || {};
+    const requestId = parseId(body.requestId);
+    if (!requestId) return res.status(400).json({ error: "Invalid requestId" });
 
-    let requestId;
-    try {
-      requestId = new ObjectId(req.params.requestId);
-    } catch {
-      return res.status(400).json({ error: "Invalid request id" });
-    }
+    const reqDoc = await db.collection("requests").findOne({ _id: requestId });
+    if (!reqDoc) return res.status(404).json({ error: "Request not found" });
 
-    const doc = {
-      requestId,
-      providerName,
-      price,
-      currency: currency || "EUR",
-      notes: notes || "",
-      createdAt: new Date()
+    const status = String(reqDoc.status || "").toUpperCase();
+    if (status !== "BIDDING")
+      return res.status(403).json({ error: "Request is not in BIDDING" });
+
+    const offer = {
+      requestId: String(reqDoc._id),
+      spUsername: username,
+      price: Number(body.price || 0),
+      currency: body.currency || "EUR",
+      deliveryDays: Number(body.deliveryDays || 0),
+      note: String(body.note || ""),
+      rolesProvided: Array.isArray(body.rolesProvided)
+        ? body.rolesProvided
+        : [],
+      status: OFFER_STATUS.SUBMITTED,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     };
 
-    const result = await db.collection("offers").insertOne(doc);
-    const saved = { ...doc, _id: result.insertedId };
-
-    // Audit log
-    await db.collection("auditLogs").insertOne({
-      type: "OfferSubmitted",
-      requestId,
-      offerId: saved._id,
-      at: new Date()
-    });
-
-    // 🔔 Notify PM + Planner (Providers submit offers)
-    await createNotification({
-      title: "New Provider Offer Submitted",
-      message: `Provider "${providerName}" submitted an offer.`,
-      roles: ["ProjectManager", "ResourcePlanner"],
-      requestId,
-      createdByRole: "Provider",
-      type: "OfferSubmitted"
-    });
-
-    return res.status(201).json(saved);
-  } catch (err) {
-    console.error("Create offer error:", err);
+    const result = await db.collection("offers").insertOne(offer);
+    return res.json({ success: true, id: result.insertedId });
+  } catch (e) {
+    console.error("Submit offer error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-// POST: PM selects preferred offer
-router.post("/api/offers/:offerId/select", async (req, res) => {
+/**
+ * GET /api/offers?requestId=...
+ * RP/PM/PO can see all offers for a request
+ * SP can see their own offers
+ */
+router.get("/", async (req, res) => {
   try {
-    const { offerId } = req.params;
-    const { requestId } = req.body;
+    const { role, username } = getUser(req);
+    if (!role) return res.status(401).json({ error: "Missing x-user-role" });
+    if (!canReadOffers(role))
+      return res.status(403).json({ error: "Not allowed" });
 
-    let oid, rid;
-    try {
-      oid = new ObjectId(offerId);
-      rid = new ObjectId(requestId);
-    } catch {
-      return res.status(400).json({ error: "Invalid offer or request id" });
-    }
+    const requestId = String(req.query.requestId || "").trim();
+    if (!requestId)
+      return res.status(400).json({ error: "requestId is required" });
 
-    // Update service request
-    const updated = await db.collection("serviceRequests").findOneAndUpdate(
-      { _id: rid },
-      { $set: { selectedOfferId: oid, status: "Selected" } },
-      { returnDocument: "after" }
-    );
+    const query = { requestId };
+    if (isSP(role)) query.spUsername = username; // SP only sees own offers
 
-    // Audit
-    await db.collection("auditLogs").insertOne({
-      type: "OfferSelected",
-      requestId: rid,
-      offerId: oid,
-      at: new Date()
-    });
+    const list = await db
+      .collection("offers")
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+    return res.json(list);
+  } catch (e) {
+    console.error("List offers error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
 
-    // 🔔 Notify Procurement + Planner
-    await createNotification({
-      title: "Preferred Offer Selected",
-      message: `PM selected a preferred offer for request "${updated.value.title}".`,
-      roles: ["ProcurementOfficer", "ResourcePlanner"],
-      requestId: rid,
-      relatedOfferId: oid,
-      createdByRole: "ProjectManager",
-      type: "OfferSelected"
-    });
+/**
+ * POST /api/offers/:id/recommend
+ * RP recommends an offer (also updates request to RECOMMENDED)
+ * body: { requestId }
+ */
+router.post("/:id/recommend", async (req, res) => {
+  try {
+    const { role, username } = getUser(req);
+    if (!role) return res.status(401).json({ error: "Missing x-user-role" });
+    if (!isRP(role))
+      return res
+        .status(403)
+        .json({ error: "Only RESOURCE_PLANNER can recommend" });
+    if (!username) return res.status(401).json({ error: "Missing x-username" });
 
-    return res.json(updated.value);
-  } catch (err) {
-    console.error("Select offer error:", err);
+    const offerId = parseId(req.params.id);
+    if (!offerId) return res.status(400).json({ error: "Invalid offer id" });
+
+    const offer = await db.collection("offers").findOne({ _id: offerId });
+    if (!offer) return res.status(404).json({ error: "Offer not found" });
+
+    const requestId = parseId(offer.requestId);
+    if (!requestId)
+      return res.status(400).json({ error: "Offer has invalid requestId" });
+
+    // mark offer recommended
+    await db
+      .collection("offers")
+      .updateOne(
+        { _id: offerId },
+        {
+          $set: {
+            status: OFFER_STATUS.RECOMMENDED,
+            updatedAt: new Date(),
+            recommendedAt: new Date(),
+            recommendedBy: username,
+          },
+        },
+      );
+
+    // update request status -> RECOMMENDED + recommendedOfferId
+    await db
+      .collection("requests")
+      .updateOne(
+        { _id: requestId },
+        {
+          $set: {
+            status: "RECOMMENDED",
+            recommendedOfferId: String(offerId),
+            recommendedAt: new Date(),
+            recommendedBy: username,
+            updatedAt: new Date(),
+          },
+        },
+      );
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("Recommend offer error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
