@@ -24,7 +24,8 @@ const PORT = process.env.PORT || 8000;
 const allowlist = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  process.env.CLIENT_URL,
+  process.env.CLIENT_URL, // your frontend domain
+  process.env.PUBLIC_BASE_URL, // ✅ allow same server origin
 ].filter(Boolean);
 
 const corsOptions = {
@@ -45,7 +46,6 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions)); // ✅ IMPORTANT
-
 
 app.use("/api/notifications", notificationsRoutes);
 /* =========================
@@ -139,19 +139,15 @@ app.use("/api/requests", requestsRoutes);
    Socket + Listen
 ========================= */
 initSocket(server);
-// ✅ Swagger UI
 app.use(
   "/api-docs",
   swaggerUi.serve,
   swaggerUi.setup(swaggerSpec, {
     explorer: true,
-    swaggerOptions: {
-      persistAuthorization: true,
-    },
+    swaggerOptions: { persistAuthorization: true },
   }),
 );
 
-// ✅ also expose raw json (helps debugging)
 app.get("/api-docs.json", (req, res) => {
   res.setHeader("Content-Type", "application/json");
   res.send(swaggerSpec);

@@ -83,7 +83,6 @@ function buildFullName(employee) {
 function pickEmployeeUsername(employee) {
   return String(employee?.username || "").trim();
 }
-
 function pickEmployeeId(employee) {
   return employee?.id || employee?._id || employee?.employeeId || null;
 }
@@ -138,6 +137,51 @@ async function findEmployeeByEmail(email) {
   return employees.find((e) => normalizeEmail(e?.email) === normEmail) || null;
 }
 
+/**
+ * @openapi
+ * tags:
+ *   - name: Auth
+ *     description: Authentication and user profile endpoints
+ */
+
+/**
+ * @openapi
+ * /api/auth/prefill:
+ *   get:
+ *     summary: Prefill registration data using employee directory
+ *     tags: [Auth]
+ *     parameters:
+ *       - in: query
+ *         name: email
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: someone@company.com
+ *     responses:
+ *       200:
+ *         description: Prefill fields
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 email: { type: string }
+ *                 username: { type: string }
+ *                 name: { type: string }
+ *                 firstName: { type: string }
+ *                 lastName: { type: string }
+ *                 role: { type: string }
+ *                 employeeId: { type: string }
+ *                 department: { type: string }
+ *                 position: { type: string }
+ *                 userId: { type: string }
+ *       400:
+ *         description: Missing email
+ *       403:
+ *         description: Unauthorized / not allowed role
+ *       500:
+ *         description: Server error
+ */
 // ✅ GET /api/auth/prefill
 router.get("/prefill", async (req, res) => {
   try {
@@ -172,6 +216,47 @@ router.get("/prefill", async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/auth/register:
+ *   post:
+ *     summary: Register a user (only if employee is allowed)
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email: { type: string, example: someone@company.com }
+ *               password: { type: string, example: "MyStrongPassword123" }
+ *     responses:
+ *       200:
+ *         description: Registration success with token and user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 token: { type: string }
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     _id: { type: string }
+ *                     username: { type: string }
+ *                     displayUsername: { type: string }
+ *                     email: { type: string }
+ *                     role: { type: string }
+ *       400:
+ *         description: Validation error / already registered
+ *       403:
+ *         description: Registration denied
+ *       500:
+ *         description: Server error
+ */
 // ✅ POST /api/auth/register
 router.post("/register", async (req, res) => {
   try {
@@ -235,6 +320,30 @@ router.post("/register", async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/auth/login:
+ *   post:
+ *     summary: Login with username + password
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [username, password]
+ *             properties:
+ *               username: { type: string, example: "john.doe" }
+ *               password: { type: string, example: "MyStrongPassword123" }
+ *     responses:
+ *       200:
+ *         description: Login success with token and user
+ *       400:
+ *         description: Invalid credentials / missing fields
+ *       500:
+ *         description: Server error
+ */
 // ✅ POST /api/auth/login
 router.post("/login", async (req, res) => {
   try {
@@ -267,6 +376,39 @@ router.post("/login", async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/auth/change-password:
+ *   post:
+ *     summary: Change password (JWT required)
+ *     tags: [Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [oldPassword, newPassword]
+ *             properties:
+ *               username:
+ *                 type: string
+ *                 description: Optional. Must match token username if provided.
+ *               oldPassword: { type: string }
+ *               newPassword: { type: string }
+ *     responses:
+ *       200:
+ *         description: Password updated
+ *       400:
+ *         description: Validation error / invalid credentials
+ *       401:
+ *         description: Missing/invalid token
+ *       403:
+ *         description: Not authorized
+ *       500:
+ *         description: Server error
+ */
 // ✅ POST /api/auth/change-password
 router.post("/change-password", authMiddleware, async (req, res) => {
   try {
