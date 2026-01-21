@@ -140,7 +140,7 @@ app.use("/api/requests", requestsRoutes);
 ========================= */
 initSocket(server);
 app.use(
-  "/api-docs",
+  "/api/docs",
   swaggerUi.serve,
   swaggerUi.setup(swaggerSpec, {
     explorer: true,
@@ -148,7 +148,7 @@ app.use(
   }),
 );
 
-app.get("/api-docs.json", (req, res) => {
+app.get("/api/docs.json", (req, res) => {
   res.setHeader("Content-Type", "application/json");
   res.send(swaggerSpec);
 });
