@@ -6,14 +6,12 @@ import dotenv from "dotenv";
 import swaggerUi from "swagger-ui-express";
 
 import { connectDB } from "./db.js";
-import { db } from "./db.js"; // ✅ add this
+import { db } from "./db.js";
 import { swaggerSpec } from "./swagger.js";
 import { initSocket } from "./socket.js";
 
-import skillsRoutes from "./routes/skills.js";
 import authRoutes from "./routes/auth.js";
 import requestsRoutes from "./routes/requests.js";
-// ...
 
 dotenv.config();
 
@@ -23,11 +21,52 @@ app.set("trust proxy", 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8000;
 
-// ... cors + json
+const allowlist = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  process.env.CLIENT_URL, // e.g. https://your-frontend.vercel.app
+].filter(Boolean);
 
+const corsOptions = {
+  origin(origin, cb) {
+    // allow Postman/curl (no origin)
+    if (!origin) return cb(null, true);
+
+    // allow exact matches
+    if (allowlist.includes(origin)) return cb(null, true);
+
+    // IMPORTANT: don't throw Error here (it causes missing CORS headers)
+    return cb(null, false);
+  },
+  credentials: false,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "x-user-role",
+    "x-username",
+  ],
+};
+
+app.use(cors(corsOptions));
+
+// ✅ preflight must use SAME corsOptions
+app.options("*", cors(corsOptions));
+
+
+/* =========================
+   ✅ Body parser (before routes)
+========================= */
+app.use(express.json({ limit: "2mb" }));
+
+/* =========================
+   DB connect
+========================= */
 await connectDB();
 
-// ✅ auto-expire job (runs in background inside the server process)
+/* =========================
+   ✅ auto-expire job (your code unchanged)
+========================= */
 function computeEndsAt(doc) {
   if (!doc?.biddingStartedAt) return null;
   const days = Number(doc?.biddingCycleDays ?? 7);
@@ -50,17 +89,15 @@ async function expireDueBiddingRequests() {
     if (!endsAt) continue;
     if (now < endsAt) continue;
 
-    // expire
-    const result = await db.collection("requests").updateOne(
-      { _id: doc._id, status: "BIDDING" },
-      {
-        $set: { status: "EXPIRED", expiredAt: now, updatedAt: now },
-      },
-    );
+    const result = await db
+      .collection("requests")
+      .updateOne(
+        { _id: doc._id, status: "BIDDING" },
+        { $set: { status: "EXPIRED", expiredAt: now, updatedAt: now } },
+      );
 
     if (!result.modifiedCount) continue;
 
-    // notification (unique)
     if (doc.createdBy) {
       const requestId = String(doc._id);
       const uniq = `${requestId}:EXPIRED`;
@@ -94,15 +131,19 @@ setInterval(
   5 * 60 * 1000,
 );
 
-// run once at startup too
 expireDueBiddingRequests().catch(() => {});
 
-app.use(authRoutes);
-app.use(requestsRoutes);
-// ...
-
+/* =========================
+   ✅ Routes (IMPORTANT: mount with prefixes)
+========================= */
 app.get("/", (req, res) => res.json({ status: "ok" }));
 
+app.use("/api/auth", authRoutes);
+app.use("/api/requests", requestsRoutes);
+
+/* =========================
+   Socket + Listen
+========================= */
 initSocket(server);
 
 server.listen(PORT, () => {
