@@ -763,61 +763,47 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
     const now = new Date();
     const requestIdStr = String(doc._id);
 
-    // ✅ IMPORTANT: only one recommended offer per request
-    // 1) reset old recommended offers (if any)
+    // clear previous recommended offer
     await db
       .collection("offers")
       .updateMany(
-        { requestId: requestIdStr, status: "RECOMMENDED" },
-        { $set: { status: "SUBMITTED", updatedAt: now } },
+        { requestId: String(id), status: "RECOMMENDED" },
+        { $set: { status: "SUBMITTED", updatedAt: new Date() } },
       );
 
-    // 2) mark selected offer recommended
+    // mark new recommended offer
     await db
       .collection("offers")
       .updateOne(
-        { _id: offerObjId },
-        { $set: { status: "RECOMMENDED", updatedAt: now } },
+        { _id: new ObjectId(offerId) },
+        { $set: { status: "RECOMMENDED", updatedAt: new Date() } },
       );
 
-    // 3) update request
+    // update request
     await db.collection("requests").updateOne(
       { _id: id },
       {
         $set: {
           status: STATUS.RECOMMENDED,
           recommendedOfferId: offerId,
-          recommendedAt: now,
+          recommendedAt: new Date(),
           recommendedBy: user.username,
-          updatedAt: now,
+          updatedAt: new Date(),
         },
       },
     );
 
-    // notify PM owner (optional)
-    if (doc.createdBy) {
-      await db.collection("notifications").insertOne({
-        toUsername: normalizeUsername(doc.createdBy),
-        type: "OFFER_RECOMMENDED",
-        title: "Offer recommended",
-        message: `RP recommended an offer for "${doc.title || "Untitled"}".`,
-        requestId: requestIdStr,
-        createdAt: now,
-        read: false,
-      });
-    }
-
-    // ✅ return updated data (helps frontend update without extra fetch)
-    const updatedReq = await db.collection("requests").findOne({ _id: id });
+    // 🔑 RETURN UPDATED DATA
+    const updatedRequest = await db.collection("requests").findOne({ _id: id });
     const updatedOffers = await db
       .collection("offers")
-      .find({ requestId: requestIdStr })
+      .find({ requestId: String(id) })
       .sort({ createdAt: -1 })
       .toArray();
 
     return res.json({
       success: true,
-      request: updatedReq,
+      request: updatedRequest,
       offers: updatedOffers,
     });
   } catch (e) {
