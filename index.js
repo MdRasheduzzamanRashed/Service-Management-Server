@@ -37,7 +37,7 @@ app.use(
       if (allowlist.includes(origin)) return cb(null, true);
       return cb(new Error("CORS blocked: " + origin), false);
     },
-    credentials: false,
+    credentials: true, // ✅ MUST be true
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "Content-Type",
@@ -47,7 +47,27 @@ app.use(
     ],
   }),
 );
-app.options("*", cors());
+
+// ✅ IMPORTANT: preflight must use SAME cors config (not default cors())
+app.options(
+  "*",
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (allowlist.includes(origin)) return cb(null, true);
+      return cb(new Error("CORS blocked: " + origin), false);
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "x-user-role",
+      "x-username",
+    ],
+  }),
+);
+
 
 
 app.use("/api/notifications", notificationsRoutes);
