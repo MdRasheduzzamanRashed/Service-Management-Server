@@ -68,8 +68,6 @@ app.options(
   }),
 );
 
-
-
 app.use("/api/notifications", notificationsRoutes);
 /* =========================
    ✅ Body parser (before routes)
