@@ -15,6 +15,7 @@ import requestsRoutes from "./routes/requests.js";
 import offersRoutes from "./routes/offers.js";
 import biddingRoutes from "./routes/bidding.js";
 import purchaseOrdersRoutes from "./routes/purchaseOrders.js";
+import ordersRoutes from "./routes/orders.js";
 
 dotenv.config();
 
@@ -159,6 +160,7 @@ app.use("/api/mock-offers", mockOffersRoutes);
 app.use("/api/offers", offersRoutes);
 app.use("/api/bidding", biddingRoutes);
 app.use("/api/purchase-orders", purchaseOrdersRoutes);
+app.use("/api/orders", ordersRoutes);
 /* =========================
    Socket + Listen
 ========================= */

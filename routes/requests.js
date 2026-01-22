@@ -881,76 +881,110 @@ router.post("/:id/order", async (req, res) => {
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
 
-    const doc = await db.collection("requests").findOne({ _id: id });
-    if (!doc) return res.status(404).json({ error: "Request not found" });
+    const requestDoc = await db.collection("requests").findOne({ _id: id });
+    if (!requestDoc)
+      return res.status(404).json({ error: "Request not found" });
 
-    if (String(doc.status || "").toUpperCase() !== STATUS.SENT_TO_PO)
-      return res.status(403).json({ error: "Only SENT_TO_PO can be ordered" });
+    const st = String(requestDoc.status || "").toUpperCase();
+    if (st !== STATUS.SENT_TO_PO) {
+      return res.status(403).json({
+        error: "Only SENT_TO_PO can be ordered",
+        status: st,
+      });
+    }
 
+    // ✅ MUST order recommended offer (or allow override if you want)
     const offerId = String(
-      req.body?.offerId || doc.recommendedOfferId || "",
+      req.body?.offerId || requestDoc.recommendedOfferId || "",
     ).trim();
-    if (!offerId)
+
+    if (!offerId) {
       return res
         .status(400)
         .json({ error: "offerId missing (no recommended offer)" });
+    }
 
     const offer = await db
       .collection("offers")
       .findOne({ _id: new ObjectId(offerId) });
+
     if (!offer) return res.status(404).json({ error: "Offer not found" });
 
+    if (String(offer.requestId) !== String(requestDoc._id)) {
+      return res
+        .status(403)
+        .json({ error: "Offer does not belong to request" });
+    }
+
+    const now = new Date();
+
+    // ✅ Create purchase order snapshot
     const po = {
-      requestId: String(doc._id),
-      offerId,
+      requestId: String(requestDoc._id),
+      offerId: String(offer._id),
       orderedBy: user.username,
-      orderedAt: new Date(),
+      orderedAt: now,
+
       totalPrice: offer.price ?? null,
       currency: offer.currency || "EUR",
-      providerUsername: offer.providerUsername,
+      providerUsername: offer.providerUsername || "",
+      providerName: offer.providerName || "",
+
       rolesProvided: offer.rolesProvided || [],
-      createdAt: new Date(),
+      deliveryDays: offer.deliveryDays ?? null,
+
+      // optional snapshot to keep history
+      snapshot: {
+        requestTitle: requestDoc.title || "",
+        requestType: requestDoc.type || "",
+        projectId: requestDoc.projectId || "",
+        projectName: requestDoc.projectName || "",
+        supplier: requestDoc.contractSupplier || "",
+        offer: {
+          price: offer.price ?? null,
+          currency: offer.currency || "EUR",
+          deliveryDays: offer.deliveryDays ?? null,
+          notes: offer.notes || "",
+        },
+      },
+
+      createdAt: now,
+      updatedAt: now,
     };
 
-    const r = await db.collection("purchase_orders").insertOne(po);
+    const insert = await db.collection("purchase_orders").insertOne(po);
 
+    // ✅ Update offer + request
     await db
       .collection("offers")
       .updateOne(
         { _id: new ObjectId(offerId) },
-        { $set: { status: "ORDERED", updatedAt: new Date() } },
+        { $set: { status: "ORDERED", updatedAt: now } },
       );
 
     await db.collection("requests").updateOne(
-      { _id: id },
+      { _id: id, status: STATUS.SENT_TO_PO },
       {
         $set: {
           status: STATUS.ORDERED,
-          orderId: String(r.insertedId),
-          orderedAt: new Date(),
+          orderId: String(insert.insertedId),
+          orderedAt: now,
           orderedBy: user.username,
-          updatedAt: new Date(),
+          orderedOfferId: String(offer._id),
+          updatedAt: now,
         },
       },
     );
 
-    if (doc.createdBy) {
-      await db.collection("notifications").insertOne({
-        toUsername: normalizeUsername(doc.createdBy),
-        type: "REQUEST_ORDERED",
-        title: "Order placed",
-        message: `PO placed an order for "${doc.title || "Untitled"}".`,
-        requestId: String(doc._id),
-        createdAt: new Date(),
-        read: false,
-      });
-    }
-
-    return res.json({ success: true, orderId: String(r.insertedId) });
+    return res.json({
+      success: true,
+      orderId: String(insert.insertedId),
+    });
   } catch (e) {
     console.error("order error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 
 export default router;
