@@ -27,28 +27,28 @@ const PORT = process.env.PORT || 8000;
 const allowlist = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  process.env.CLIENT_URL, // your frontend domain
-  process.env.PUBLIC_BASE_URL, // ✅ allow same server origin
+  process.env.CLIENT_URL, // your Vercel domain
 ].filter(Boolean);
 
-const corsOptions = {
-  origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    if (allowlist.includes(origin)) return cb(null, true);
-    return cb(new Error("CORS blocked: " + origin), false);
-  },
-  credentials: true, // ✅ MUST be true
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "x-user-role",
-    "x-username",
-  ],
-};
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (allowlist.includes(origin)) return cb(null, true);
+      return cb(new Error("CORS blocked: " + origin), false);
+    },
+    credentials: false,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "x-user-role",
+      "x-username",
+    ],
+  }),
+);
+app.options("*", cors());
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // ✅ IMPORTANT
 
 app.use("/api/notifications", notificationsRoutes);
 /* =========================
