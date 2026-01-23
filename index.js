@@ -21,8 +21,6 @@ dotenv.config();
 
 const app = express();
 app.set("trust proxy", 1);
-
-// ✅ IMPORTANT: disable ETag (prevents 304 Not Modified issues)
 app.set("etag", false);
 
 const server = http.createServer(app);
@@ -31,64 +29,83 @@ const PORT = process.env.PORT || 8000;
 const allowlist = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  process.env.CLIENT_URL, // e.g. https://service-management-client.vercel.app
+  process.env.CLIENT_URL, // https://service-management-client.vercel.app
 ].filter(Boolean);
 
-/**
- * ✅ Enterprise CORS:
- * - Allows your prod domain + localhost
- * - Allows ALL vercel preview deployments
- * - Allows whatever headers the browser asks during preflight
- * - Adds maxAge to reduce preflight spam
- */
+// ✅ CORS OPTIONS (STATIC HEADERS = stable)
 const corsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true); // server-to-server / curl / mobile apps
+    if (!origin) return cb(null, true);
+
     if (allowlist.includes(origin)) return cb(null, true);
+
+    // ✅ allow vercel preview + prod deployments
     if (origin.endsWith(".vercel.app")) return cb(null, true);
+
     return cb(new Error("CORS blocked: " + origin), false);
   },
-
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "x-user-role",
+    "x-username",
 
-  // ✅ KEY FIX: allow headers requested by browser in preflight
-  allowedHeaders(req, cb) {
-    const requested = req.header("Access-Control-Request-Headers");
-    if (!requested) {
-      // fallback safe defaults
-      return cb(null, [
-        "Content-Type",
-        "Authorization",
-        "x-user-role",
-        "x-username",
-        "cache-control",
-        "pragma",
-        "expires",
-        "if-modified-since",
-        "if-none-match",
-      ]);
-    }
-    const list = requested
-      .split(",")
-      .map((h) => h.trim())
-      .filter(Boolean);
-    return cb(null, list);
-  },
+    // ✅ Fix for your error
+    "cache-control",
+    "pragma",
+    "expires",
 
-  // ✅ reduce preflight frequency (1 day)
-  maxAge: 86400,
-
+    // ✅ optional but safe
+    "if-modified-since",
+    "if-none-match",
+  ],
   optionsSuccessStatus: 204,
+  maxAge: 86400,
 };
 
+// ✅ Apply cors to all
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+
+// ✅ HARD GUARANTEE: preflight always returns 204 with correct headers
+app.options("*", (req, res) => {
+  const origin = req.headers.origin;
+
+  // origin check (same logic)
+  const allowed =
+    !origin ||
+    allowlist.includes(origin) ||
+    (typeof origin === "string" && origin.endsWith(".vercel.app"));
+
+  if (!allowed) {
+    return res.status(403).send("CORS blocked: " + origin);
+  }
+
+  res.header("Access-Control-Allow-Origin", origin);
+  res.header("Vary", "Origin");
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+  );
+
+  // if browser asks for more headers, echo them back (most robust)
+  const reqHeaders = req.header("Access-Control-Request-Headers");
+  res.header(
+    "Access-Control-Allow-Headers",
+    reqHeaders ||
+      "Content-Type,Authorization,x-user-role,x-username,cache-control,pragma,expires,if-modified-since,if-none-match",
+  );
+
+  res.header("Access-Control-Max-Age", "86400");
+  return res.sendStatus(204);
+});
 
 // ✅ Body parser
 app.use(express.json({ limit: "2mb" }));
 
-// ✅ Disable caching for API responses (prevents stale UI issues)
+// ✅ Disable caching for API responses
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/")) {
     res.setHeader(
