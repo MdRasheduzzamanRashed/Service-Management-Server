@@ -2,6 +2,7 @@
 import express from "express";
 import { ObjectId } from "mongodb";
 import { db } from "../db.js";
+import { createNotification } from "../utils/notify.js";
 
 const router = express.Router();
 
@@ -159,24 +160,14 @@ async function ensureExpiredIfDue(doc) {
 
   if (doc.createdBy) {
     const requestId = String(doc._id);
-    const uniq = `${requestId}:EXPIRED`;
-
-    await db.collection("notifications").updateOne(
-      { uniqKey: uniq },
-      {
-        $setOnInsert: {
-          uniqKey: uniq,
-          toUsername: normalizeUsername(doc.createdBy),
-          type: "REQUEST_EXPIRED",
-          title: "Request expired",
-          message: `Your request "${doc.title || "Untitled"}" has expired after the bidding cycle.`,
-          requestId,
-          createdAt: now,
-          read: false,
-        },
-      },
-      { upsert: true },
-    );
+    await createNotification({
+      uniqKey: `${requestId}:EXPIRED`,
+      toUsername: doc.createdBy,
+      type: "REQUEST_EXPIRED",
+      title: "Request expired",
+      message: `Your request "${doc.title || "Untitled"}" has expired after the bidding cycle.`,
+      requestId,
+    });
   }
 
   return await db.collection("requests").findOne({ _id: doc._id });
@@ -208,6 +199,7 @@ async function autoCompleteBiddingIfEnoughOffers(reqDoc) {
 
   if (offersCount >= maxOffers) {
     const now = new Date();
+
     await db.collection("requests").updateOne(
       { _id: reqDoc._id, status: STATUS.BIDDING },
       {
@@ -218,6 +210,27 @@ async function autoCompleteBiddingIfEnoughOffers(reqDoc) {
         },
       },
     );
+
+    // ✅ notify PM owner + RP role (idempotent)
+    if (reqDoc.createdBy) {
+      await createNotification({
+        uniqKey: `${requestId}:AUTO_TO_BID_EVAL_PM`,
+        toUsername: reqDoc.createdBy,
+        type: "REQUEST_STATUS",
+        title: "Bidding completed",
+        message: `Your request "${reqDoc.title || "Untitled"}" moved to BID_EVALUATION (offers reached max).`,
+        requestId,
+      });
+    }
+
+    await createNotification({
+      uniqKey: `${requestId}:AUTO_TO_BID_EVAL_RP`,
+      toRole: "RESOURCE_PLANNER",
+      type: "REQUEST_STATUS",
+      title: "Requests ready for evaluation",
+      message: `Request "${reqDoc.title || "Untitled"}" is now in BID_EVALUATION.`,
+      requestId,
+    });
 
     return { ...reqDoc, status: STATUS.BID_EVALUATION, offersCount };
   }
@@ -274,6 +287,16 @@ router.post("/", async (req, res) => {
     };
 
     const result = await db.collection("requests").insertOne(doc);
+
+    // optional: notify creator (idempotent not needed here)
+    await createNotification({
+      toUsername: doc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Request created",
+      message: `You created a new request "${doc.title || "Untitled"}" (DRAFT).`,
+      requestId: String(result.insertedId),
+    });
+
     return res.json({ success: true, id: String(result.insertedId) });
   } catch (e) {
     console.error("Create request error:", e);
@@ -283,11 +306,6 @@ router.post("/", async (req, res) => {
 
 /* ================================
    LIST (admin/pm/rp/po)
-   supports:
-   - ?view=my (PM only)
-   - ?status=...
-   - ?q=... (search)
-   - ?page=1&limit=20
    Returns: { data, meta }
 ================================== */
 router.get("/", async (req, res) => {
@@ -336,10 +354,8 @@ router.get("/", async (req, res) => {
       ];
     }
 
-    // total count (match only, without lookup)
     const total = await db.collection("requests").countDocuments(match);
 
-    // data with offersCount
     const pipeline = [
       ...addOffersCountPipeline(match),
       { $sort: { createdAt: -1 } },
@@ -349,7 +365,6 @@ router.get("/", async (req, res) => {
 
     const list = await db.collection("requests").aggregate(pipeline).toArray();
 
-    // enforce expiry + auto-complete
     const enhanced = await Promise.all(
       (list || []).map(async (r) => {
         const afterExpire = await ensureExpiredIfDue(r);
@@ -375,7 +390,6 @@ router.get("/", async (req, res) => {
 
 /* ================================
    LIST BIDDING (Public)
-   GET /api/requests/bidding
 ================================== */
 router.get("/bidding", async (req, res) => {
   try {
@@ -425,7 +439,7 @@ router.get("/bidding", async (req, res) => {
 });
 
 /* ================================
-   LIST BID_EVALUATION (PM/RP/PO/Admin)
+   LIST BID_EVALUATION
 ================================== */
 router.get("/bid-evaluation", async (req, res) => {
   try {
@@ -448,7 +462,7 @@ router.get("/bid-evaluation", async (req, res) => {
 });
 
 /* ================================
-   GET ONE (includes offersCount + expiry + auto-complete)
+   GET ONE
 ================================== */
 router.get("/:id", async (req, res) => {
   try {
@@ -579,17 +593,38 @@ router.post("/:id/submit-for-review", async (req, res) => {
         .status(403)
         .json({ error: "Only DRAFT can be submitted for review" });
 
+    const now = new Date();
+
     await db.collection("requests").updateOne(
       { _id: id },
       {
         $set: {
           status: STATUS.IN_REVIEW,
-          submittedAt: new Date(),
+          submittedAt: now,
           submittedBy: normalizeUsername(user.username),
-          updatedAt: new Date(),
+          updatedAt: now,
         },
       },
     );
+
+    // ✅ Notify RP role + PM owner
+    await createNotification({
+      uniqKey: `${String(id)}:SUBMITTED_FOR_REVIEW_RP`,
+      toRole: "RESOURCE_PLANNER",
+      type: "REQUEST_STATUS",
+      title: "New request in review",
+      message: `Request "${doc.title || "Untitled"}" submitted for review.`,
+      requestId: String(id),
+    });
+
+    await createNotification({
+      uniqKey: `${String(id)}:SUBMITTED_FOR_REVIEW_PM`,
+      toUsername: doc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Submitted for review",
+      message: `Your request "${doc.title || "Untitled"}" is now IN_REVIEW.`,
+      requestId: String(id),
+    });
 
     const updated = await db.collection("requests").findOne({ _id: id });
     return res.json(updated);
@@ -622,17 +657,29 @@ router.post("/:id/rp-approve", async (req, res) => {
         .status(403)
         .json({ error: "Only IN_REVIEW requests can be approved" });
 
+    const now = new Date();
+
     await db.collection("requests").updateOne(
       { _id: id },
       {
         $set: {
           status: STATUS.APPROVED_FOR_SUBMISSION,
-          rpApprovedAt: new Date(),
+          rpApprovedAt: now,
           rpApprovedBy: normalizeUsername(user.username),
-          updatedAt: new Date(),
+          updatedAt: now,
         },
       },
     );
+
+    // ✅ Notify PM owner
+    await createNotification({
+      uniqKey: `${String(id)}:RP_APPROVED`,
+      toUsername: doc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Request approved",
+      message: `Your request "${doc.title || "Untitled"}" was approved for submission.`,
+      requestId: String(id),
+    });
 
     const updated = await db.collection("requests").findOne({ _id: id });
     return res.json(updated);
@@ -666,19 +713,31 @@ router.post("/:id/rp-reject", async (req, res) => {
         .json({ error: "Only IN_REVIEW requests can be rejected" });
 
     const reason = String(req.body?.reason || "").trim();
+    const now = new Date();
 
     await db.collection("requests").updateOne(
       { _id: id },
       {
         $set: {
           status: STATUS.REJECTED,
-          rpRejectedAt: new Date(),
+          rpRejectedAt: now,
           rpRejectedBy: normalizeUsername(user.username),
           rpRejectReason: reason,
-          updatedAt: new Date(),
+          updatedAt: now,
         },
       },
     );
+
+    // ✅ Notify PM owner
+    await createNotification({
+      uniqKey: `${String(id)}:RP_REJECTED`,
+      toUsername: doc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Request rejected",
+      message:
+        `Your request "${doc.title || "Untitled"}" was rejected. ${reason ? `Reason: ${reason}` : ""}`.trim(),
+      requestId: String(id),
+    });
 
     const updated = await db.collection("requests").findOne({ _id: id });
     return res.json(updated);
@@ -715,17 +774,38 @@ router.post("/:id/submit-for-bidding", async (req, res) => {
         .status(403)
         .json({ error: "Only APPROVED_FOR_SUBMISSION can go to BIDDING" });
 
+    const now = new Date();
+
     await db.collection("requests").updateOne(
       { _id: id },
       {
         $set: {
           status: STATUS.BIDDING,
-          biddingStartedAt: new Date(),
+          biddingStartedAt: now,
           biddingStartedBy: normalizeUsername(user.username),
-          updatedAt: new Date(),
+          updatedAt: now,
         },
       },
     );
+
+    // ✅ Notify service providers + PM owner
+    await createNotification({
+      uniqKey: `${String(id)}:BIDDING_OPEN_SP`,
+      toRole: "SERVICE_PROVIDER",
+      type: "REQUEST_STATUS",
+      title: "New bidding request",
+      message: `New request "${doc.title || "Untitled"}" is open for bidding.`,
+      requestId: String(id),
+    });
+
+    await createNotification({
+      uniqKey: `${String(id)}:BIDDING_OPEN_PM`,
+      toUsername: doc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Bidding started",
+      message: `Your request "${doc.title || "Untitled"}" is now BIDDING.`,
+      requestId: String(id),
+    });
 
     const updated = await db.collection("requests").findOne({ _id: id });
     return res.json(updated);
@@ -760,14 +840,16 @@ router.post("/:id/reactivate", async (req, res) => {
         .status(403)
         .json({ error: "Only EXPIRED requests can be reactivated" });
 
+    const now = new Date();
+
     await db.collection("requests").updateOne(
       { _id: id, status: STATUS.EXPIRED },
       {
         $set: {
           status: STATUS.APPROVED_FOR_SUBMISSION,
-          reactivatedAt: new Date(),
+          reactivatedAt: now,
           reactivatedBy: normalizeUsername(user.username),
-          updatedAt: new Date(),
+          updatedAt: now,
         },
         $unset: {
           biddingStartedAt: "",
@@ -776,6 +858,16 @@ router.post("/:id/reactivate", async (req, res) => {
         },
       },
     );
+
+    // ✅ Notify PM owner
+    await createNotification({
+      uniqKey: `${String(id)}:REACTIVATED`,
+      toUsername: doc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Request reactivated",
+      message: `Your request "${doc.title || "Untitled"}" was reactivated to APPROVED_FOR_SUBMISSION.`,
+      requestId: String(id),
+    });
 
     const updated = await db.collection("requests").findOne({ _id: id });
     return res.json(updated);
@@ -859,6 +951,25 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
       },
     );
 
+    // ✅ Notify PM owner + PO role
+    await createNotification({
+      uniqKey: `${String(id)}:RECOMMENDED_PM`,
+      toUsername: doc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Offer recommended",
+      message: `Request "${doc.title || "Untitled"}" is now RECOMMENDED.`,
+      requestId: String(id),
+    });
+
+    await createNotification({
+      uniqKey: `${String(id)}:RECOMMENDED_PO`,
+      toRole: "PROCUREMENT_OFFICER",
+      type: "REQUEST_STATUS",
+      title: "Upcoming order request",
+      message: `Request "${doc.title || "Untitled"}" is RECOMMENDED (PM may send to PO soon).`,
+      requestId: String(id),
+    });
+
     const updatedRequest = await db.collection("requests").findOne({ _id: id });
     const updatedOffers = await db
       .collection("offers")
@@ -879,7 +990,6 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
 
 /* ================================
    PM: RECOMMENDED -> SENT_TO_PO
-   (returns updated request)
 ================================== */
 router.post("/:id/send-to-po", async (req, res) => {
   try {
@@ -917,14 +1027,24 @@ router.post("/:id/send-to-po", async (req, res) => {
       },
     );
 
-    await db.collection("notifications").insertOne({
+    // ✅ Notify PO role (idempotent)
+    await createNotification({
+      uniqKey: `${String(id)}:SENT_TO_PO`,
       toRole: "PROCUREMENT_OFFICER",
       type: "REQUEST_SENT_TO_PO",
       title: "New request for ordering",
       message: `A request "${doc.title || "Untitled"}" is ready for ordering.`,
       requestId: String(doc._id),
-      createdAt: now,
-      read: false,
+    });
+
+    // ✅ Notify PM owner copy
+    await createNotification({
+      uniqKey: `${String(id)}:SENT_TO_PO_PM`,
+      toUsername: doc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Sent to procurement",
+      message: `Your request "${doc.title || "Untitled"}" is now SENT_TO_PO.`,
+      requestId: String(doc._id),
     });
 
     const updated = await db.collection("requests").findOne({ _id: id });
@@ -937,7 +1057,6 @@ router.post("/:id/send-to-po", async (req, res) => {
 
 /* ================================
    PO: SENT_TO_PO -> ORDERED
-   (returns updated request + orderId)
 ================================== */
 router.post("/:id/order", async (req, res) => {
   try {
@@ -1039,6 +1158,26 @@ router.post("/:id/order", async (req, res) => {
         },
       },
     );
+
+    // ✅ Notify PM owner
+    await createNotification({
+      uniqKey: `${String(id)}:ORDERED_PM`,
+      toUsername: requestDoc.createdBy,
+      type: "REQUEST_STATUS",
+      title: "Request ordered",
+      message: `Your request "${requestDoc.title || "Untitled"}" is now ORDERED.`,
+      requestId: String(id),
+    });
+
+    // optional: notify PO role copy (if you want everyone in PO role see it)
+    await createNotification({
+      uniqKey: `${String(id)}:ORDERED_PO`,
+      toRole: "PROCUREMENT_OFFICER",
+      type: "REQUEST_STATUS",
+      title: "Order placed",
+      message: `Order placed for request "${requestDoc.title || "Untitled"}".`,
+      requestId: String(id),
+    });
 
     const updated = await db.collection("requests").findOne({ _id: id });
     return res.json({

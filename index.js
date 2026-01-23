@@ -21,7 +21,7 @@ dotenv.config();
 const app = express();
 app.set("trust proxy", 1);
 
-// ✅ avoid 304 caching problems
+// ✅ avoid 304 caching problems (client gets latest)
 app.set("etag", false);
 
 const server = http.createServer(app);
@@ -30,16 +30,15 @@ const PORT = process.env.PORT || 8000;
 const allowlist = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  process.env.CLIENT_URL, // https://service-management-client.vercel.app
+  process.env.CLIENT_URL, // e.g. https://service-management-client.vercel.app
 ].filter(Boolean);
 
-// ✅ CORS (FIXED)
+// ✅ CORS
 const corsOptions = {
   origin(origin, cb) {
     // allow curl/postman and same-origin
     if (!origin) return cb(null, true);
 
-    // exact allowlist
     if (allowlist.includes(origin)) return cb(null, true);
 
     // allow vercel preview deployments
@@ -48,16 +47,18 @@ const corsOptions = {
     return cb(new Error("CORS blocked: " + origin), false);
   },
 
+  // ✅ keep true (safe if later you use cookies); doesn't break withCredentials:false
   credentials: true,
 
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 
-  // ✅ IMPORTANT: allow cache-control because browser/axios may send it
   allowedHeaders: [
     "Content-Type",
     "Authorization",
     "x-user-role",
     "x-username",
+
+    // ✅ some browsers send these automatically
     "cache-control",
     "pragma",
     "expires",
@@ -65,7 +66,9 @@ const corsOptions = {
     "if-none-match",
   ],
 
-  // ✅ important so OPTIONS returns success in all browsers
+  // ✅ optional: allows browser to read these headers if you set them
+  exposedHeaders: ["etag", "x-total-count"],
+
   optionsSuccessStatus: 204,
 };
 
@@ -78,7 +81,7 @@ app.options("*", cors(corsOptions));
 // ✅ Body parser
 app.use(express.json({ limit: "2mb" }));
 
-// ✅ disable caching for API responses (optional but recommended)
+// ✅ disable caching for API responses
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/")) {
     res.setHeader(
@@ -122,6 +125,24 @@ app.use(
 app.get("/api/docs.json", (req, res) => {
   res.setHeader("Content-Type", "application/json");
   res.send(swaggerSpec);
+});
+
+/* =========================
+   Error handlers
+========================= */
+
+// ✅ CORS error handler (clean JSON instead of server crash)
+app.use((err, req, res, next) => {
+  if (err?.message?.startsWith("CORS blocked:")) {
+    return res.status(403).json({ error: err.message });
+  }
+  return next(err);
+});
+
+// ✅ global error handler
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err);
+  res.status(500).json({ error: "Server error" });
 });
 
 /* =========================
