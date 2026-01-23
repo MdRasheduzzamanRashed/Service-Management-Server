@@ -1,4 +1,8 @@
 // swagger.js
-import swaggerDocument from "./swagger-output.json" assert { type: "json" };
+import fs from "fs";
 
-export const swaggerSpec = swaggerDocument;
+const swaggerSpec = JSON.parse(
+  fs.readFileSync("./swagger-output.json", "utf8"),
+);
+
+export { swaggerSpec };
