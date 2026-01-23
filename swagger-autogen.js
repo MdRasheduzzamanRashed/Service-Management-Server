@@ -14,15 +14,6 @@ const doc = {
     { url: "http://localhost:8000/api" },
   ],
 
-  tags: [
-    { name: "Auth", description: "Authentication" },
-    { name: "Requests", description: "Service requests & workflow" },
-    { name: "Offers", description: "Offers" },
-    { name: "Bidding", description: "Bidding lists" },
-    { name: "Orders", description: "Orders & Purchase Orders" },
-    { name: "Notifications", description: "Notifications" },
-  ],
-
   components: {
     securitySchemes: {
       bearerAuth: {
