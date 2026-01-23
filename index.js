@@ -34,31 +34,52 @@ const allowlist = [
   process.env.CLIENT_URL, // e.g. https://service-management-client.vercel.app
 ].filter(Boolean);
 
-// ✅ CORS OPTIONS (supports Vercel preview + PATCH)
+/**
+ * ✅ Enterprise CORS:
+ * - Allows your prod domain + localhost
+ * - Allows ALL vercel preview deployments
+ * - Allows whatever headers the browser asks during preflight
+ * - Adds maxAge to reduce preflight spam
+ */
 const corsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true);
-
+    if (!origin) return cb(null, true); // server-to-server / curl / mobile apps
     if (allowlist.includes(origin)) return cb(null, true);
-
-    // ✅ allow all vercel deployments (prod + preview)
     if (origin.endsWith(".vercel.app")) return cb(null, true);
-
     return cb(new Error("CORS blocked: " + origin), false);
   },
+
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 
-  // ✅ FIX: allow cache-control headers (and common cache headers)
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "x-user-role",
-    "x-username",
-    "cache-control",
-    "pragma",
-    "expires",
-  ],
+  // ✅ KEY FIX: allow headers requested by browser in preflight
+  allowedHeaders(req, cb) {
+    const requested = req.header("Access-Control-Request-Headers");
+    if (!requested) {
+      // fallback safe defaults
+      return cb(null, [
+        "Content-Type",
+        "Authorization",
+        "x-user-role",
+        "x-username",
+        "cache-control",
+        "pragma",
+        "expires",
+        "if-modified-since",
+        "if-none-match",
+      ]);
+    }
+    const list = requested
+      .split(",")
+      .map((h) => h.trim())
+      .filter(Boolean);
+    return cb(null, list);
+  },
+
+  // ✅ reduce preflight frequency (1 day)
+  maxAge: 86400,
+
+  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
@@ -67,7 +88,7 @@ app.options("*", cors(corsOptions));
 // ✅ Body parser
 app.use(express.json({ limit: "2mb" }));
 
-// ✅ IMPORTANT: disable caching for API responses (prevents 304 + stale data)
+// ✅ Disable caching for API responses (prevents stale UI issues)
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/")) {
     res.setHeader(
