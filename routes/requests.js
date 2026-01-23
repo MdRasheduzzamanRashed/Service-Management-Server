@@ -30,6 +30,20 @@ const STATUS = {
 };
 
 /* =========================
+   Enterprise: No-cache for API
+========================= */
+router.use((req, res, next) => {
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate",
+  );
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+  next();
+});
+
+/* =========================
    Helpers (Auth + IDs)
 ========================= */
 function normalizeRole(raw) {
@@ -51,17 +65,20 @@ function normalizeRole(raw) {
   };
   return map[noUnderscore] || map[upper] || upper;
 }
+
 function normalizeUsername(raw) {
   return String(raw || "")
     .trim()
     .toLowerCase();
 }
+
 function getUser(req) {
   const role = normalizeRole(req.headers["x-user-role"]);
   if (!role) return { error: "Missing x-user-role" };
   const username = normalizeUsername(req.headers["x-username"]);
   return { role, username };
 }
+
 function canReadAll(role) {
   return (
     role === "PROJECT_MANAGER" ||
@@ -79,6 +96,7 @@ function isRP(role) {
 function isPO(role) {
   return role === "PROCUREMENT_OFFICER";
 }
+
 function parseId(idStr) {
   try {
     return new ObjectId(String(idStr));
@@ -86,9 +104,23 @@ function parseId(idStr) {
     return null;
   }
 }
+
 function isOwner(doc, username) {
   if (!username) return false;
   return normalizeUsername(doc?.createdBy) === normalizeUsername(username);
+}
+
+/* =========================
+   Pagination helpers
+========================= */
+function clampInt(v, def, min, max) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function escapeRegex(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /* =========================
@@ -116,7 +148,6 @@ async function ensureExpiredIfDue(doc) {
   const now = new Date();
   if (now < endsAt) return doc;
 
-  // already expired? return
   if (String(doc.status || "").toUpperCase() === STATUS.EXPIRED) return doc;
 
   await db
@@ -126,7 +157,6 @@ async function ensureExpiredIfDue(doc) {
       { $set: { status: STATUS.EXPIRED, expiredAt: now, updatedAt: now } },
     );
 
-  // notify PM owner (optional)
   if (doc.createdBy) {
     const requestId = String(doc._id);
     const uniq = `${requestId}:EXPIRED`;
@@ -153,36 +183,28 @@ async function ensureExpiredIfDue(doc) {
 }
 
 /* =========================
-   Offers helpers
+   Offers helpers (enterprise)
 ========================= */
-async function countOffers(requestIdStr) {
-  return await db
-    .collection("offers")
-    .countDocuments({ requestId: requestIdStr });
-}
-
 /**
- * ✅ AUTO COMPLETE: if offersCount >= maxOffers (and request is BIDDING)
- * Move to BID_EVALUATION.
- * Returns doc with offersCount + possibly updated status
+ * Auto-complete: if offersCount >= maxOffers and status is BIDDING -> BID_EVALUATION
+ * Uses doc.offersCount if present (from lookup), otherwise counts on demand.
  */
 async function autoCompleteBiddingIfEnoughOffers(reqDoc) {
   if (!reqDoc) return reqDoc;
 
   const st = String(reqDoc.status || "").toUpperCase();
-  if (st !== STATUS.BIDDING) {
-    // still attach offersCount if possible
-    const offersCount = await countOffers(String(reqDoc._id));
-    return { ...reqDoc, offersCount };
-  }
+
+  const requestId = String(reqDoc._id);
+  const offersCount =
+    typeof reqDoc.offersCount === "number"
+      ? reqDoc.offersCount
+      : await db.collection("offers").countDocuments({ requestId });
+
+  // always attach offersCount
+  if (st !== STATUS.BIDDING) return { ...reqDoc, offersCount };
 
   const maxOffers = Number(reqDoc.maxOffers ?? 0);
-  const requestId = String(reqDoc._id);
-  const offersCount = await countOffers(requestId);
-
-  if (!maxOffers || maxOffers <= 0) {
-    return { ...reqDoc, offersCount };
-  }
+  if (!maxOffers || maxOffers <= 0) return { ...reqDoc, offersCount };
 
   if (offersCount >= maxOffers) {
     const now = new Date();
@@ -201,6 +223,28 @@ async function autoCompleteBiddingIfEnoughOffers(reqDoc) {
   }
 
   return { ...reqDoc, offersCount };
+}
+
+/* =========================
+   Aggregation: attach offersCount fast
+========================= */
+function addOffersCountPipeline(match) {
+  return [
+    { $match: match || {} },
+    {
+      $lookup: {
+        from: "offers",
+        let: { rid: { $toString: "$_id" } },
+        pipeline: [
+          { $match: { $expr: { $eq: ["$requestId", "$$rid"] } } },
+          { $project: { _id: 1 } },
+        ],
+        as: "__offers",
+      },
+    },
+    { $addFields: { offersCount: { $size: "$__offers" } } },
+    { $project: { __offers: 0 } },
+  ];
 }
 
 /* ================================
@@ -224,7 +268,7 @@ router.post("/", async (req, res) => {
     const doc = {
       ...body,
       status: STATUS.DRAFT,
-      createdBy: user.username,
+      createdBy: normalizeUsername(user.username),
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -239,8 +283,12 @@ router.post("/", async (req, res) => {
 
 /* ================================
    LIST (admin/pm/rp/po)
-   supports ?view=my (PM only) and ?status=...
-   ✅ also auto-completes BIDDING -> BID_EVALUATION
+   supports:
+   - ?view=my (PM only)
+   - ?status=...
+   - ?q=... (search)
+   - ?page=1&limit=20
+   Returns: { data, meta }
 ================================== */
 router.get("/", async (req, res) => {
   try {
@@ -249,13 +297,20 @@ router.get("/", async (req, res) => {
     if (!canReadAll(user.role))
       return res.status(403).json({ error: "Not allowed to view requests." });
 
-    const status = String(req.query.status || "").trim();
+    const status = String(req.query.status || "")
+      .trim()
+      .toUpperCase();
     const view = String(req.query.view || "")
       .trim()
       .toLowerCase();
+    const q = String(req.query.q || "").trim();
 
-    const query = {};
-    if (status) query.status = status;
+    const page = clampInt(req.query.page, 1, 1, 1000000);
+    const limit = clampInt(req.query.limit, 50, 1, 100);
+    const skip = (page - 1) * limit;
+
+    const match = {};
+    if (status) match.status = status;
 
     if (view === "my") {
       if (!isPM(user.role))
@@ -264,27 +319,54 @@ router.get("/", async (req, res) => {
           .json({ error: "Only PROJECT_MANAGER can use view=my" });
       if (!user.username)
         return res.status(401).json({ error: "Missing x-username" });
-      query.createdBy = user.username;
+      match.createdBy = normalizeUsername(user.username);
     }
 
-    const list = await db
-      .collection("requests")
-      .find(query)
-      .sort({ createdAt: -1 })
-      .toArray();
+    if (q) {
+      const safe = escapeRegex(q);
+      const rx = new RegExp(safe, "i");
+      match.$or = [
+        { title: rx },
+        { projectId: rx },
+        { projectName: rx },
+        { contractSupplier: rx },
+        { createdBy: rx },
+        { type: rx },
+        { performanceLocation: rx },
+      ];
+    }
 
-    // ✅ important: run expiry + auto-complete on items
+    // total count (match only, without lookup)
+    const total = await db.collection("requests").countDocuments(match);
+
+    // data with offersCount
+    const pipeline = [
+      ...addOffersCountPipeline(match),
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+    ];
+
+    const list = await db.collection("requests").aggregate(pipeline).toArray();
+
+    // enforce expiry + auto-complete
     const enhanced = await Promise.all(
-      list.map(async (r) => {
-        // expire if needed
+      (list || []).map(async (r) => {
         const afterExpire = await ensureExpiredIfDue(r);
-        // auto-complete if enough offers
         const afterAuto = await autoCompleteBiddingIfEnoughOffers(afterExpire);
         return afterAuto;
       }),
     );
 
-    return res.json(enhanced);
+    return res.json({
+      data: enhanced,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit) || 1,
+      },
+    });
   } catch (e) {
     console.error("List requests error:", e);
     return res.status(500).json({ error: "Server error" });
@@ -292,50 +374,50 @@ router.get("/", async (req, res) => {
 });
 
 /* ================================
-   LIST BIDDING
+   LIST BIDDING (Public)
    GET /api/requests/bidding
-   - returns BIDDING requests (and those that just became BID_EVALUATION)
 ================================== */
-
 router.get("/bidding", async (req, res) => {
   try {
-    const list = await db
-      .collection("requests")
-      .find({ status: STATUS.BIDDING })
-      .sort({ biddingStartedAt: -1, createdAt: -1 })
-      .project({
-        title: 1,
-        status: 1,
-        createdAt: 1,
-        biddingStartedAt: 1,
-        biddingCycleDays: 1,
-        maxOffers: 1,
-        roles: 1,
-        requiredLanguages: 1,
-        mustHaveCriteria: 1,
-        niceToHaveCriteria: 1,
-        performanceLocation: 1,
-        startDate: 1,
-        endDate: 1,
-        projectId: 1,
-        projectName: 1,
-      })
-      .toArray();
+    const match = { status: STATUS.BIDDING };
 
-    if (!list.length) return res.json([]);
+    const pipeline = [
+      ...addOffersCountPipeline(match),
+      {
+        $project: {
+          title: 1,
+          status: 1,
+          createdAt: 1,
+          biddingStartedAt: 1,
+          biddingCycleDays: 1,
+          maxOffers: 1,
+          roles: 1,
+          requiredLanguages: 1,
+          mustHaveCriteria: 1,
+          niceToHaveCriteria: 1,
+          performanceLocation: 1,
+          startDate: 1,
+          endDate: 1,
+          projectId: 1,
+          projectName: 1,
+          offersCount: 1,
+        },
+      },
+      { $sort: { biddingStartedAt: -1, createdAt: -1 } },
+    ];
+
+    const list = await db.collection("requests").aggregate(pipeline).toArray();
+    if (!list.length) return res.json({ data: [], meta: { total: 0 } });
 
     const enhanced = await Promise.all(
       list.map(async (r) => {
-        // expire if due
         const afterExpire = await ensureExpiredIfDue(r);
-        // auto-complete if enough offers
         const afterAuto = await autoCompleteBiddingIfEnoughOffers(afterExpire);
         return afterAuto;
       }),
     );
 
-    // return both BIDDING and newly BID_EVALUATION (as you wanted)
-    return res.json(enhanced);
+    return res.json({ data: enhanced, meta: { total: enhanced.length } });
   } catch (e) {
     console.error("Public bidding error:", e);
     return res.status(500).json({ error: "Server error" });
@@ -352,20 +434,13 @@ router.get("/bid-evaluation", async (req, res) => {
     if (!canReadAll(user.role))
       return res.status(403).json({ error: "Not allowed" });
 
-    const list = await db
-      .collection("requests")
-      .find({ status: STATUS.BID_EVALUATION })
-      .sort({ bidEvaluationAt: -1, createdAt: -1 })
-      .toArray();
+    const pipeline = [
+      ...addOffersCountPipeline({ status: STATUS.BID_EVALUATION }),
+      { $sort: { bidEvaluationAt: -1, createdAt: -1 } },
+    ];
 
-    const enhanced = await Promise.all(
-      list.map(async (r) => {
-        const offersCount = await countOffers(String(r._id));
-        return { ...r, offersCount };
-      }),
-    );
-
-    return res.json(enhanced);
+    const list = await db.collection("requests").aggregate(pipeline).toArray();
+    return res.json({ data: list, meta: { total: list.length } });
   } catch (e) {
     console.error("bid-evaluation list error:", e);
     return res.status(500).json({ error: "Server error" });
@@ -373,7 +448,7 @@ router.get("/bid-evaluation", async (req, res) => {
 });
 
 /* ================================
-   GET ONE (includes expiry + auto-complete + offersCount)
+   GET ONE (includes offersCount + expiry + auto-complete)
 ================================== */
 router.get("/:id", async (req, res) => {
   try {
@@ -385,19 +460,16 @@ router.get("/:id", async (req, res) => {
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
 
-    const doc = await db.collection("requests").findOne({ _id: id });
+    const pipeline = [...addOffersCountPipeline({ _id: id }), { $limit: 1 }];
+
+    const arr = await db.collection("requests").aggregate(pipeline).toArray();
+    const doc = arr?.[0];
     if (!doc) return res.status(404).json({ error: "Request not found" });
 
     const afterExpire = await ensureExpiredIfDue(doc);
     const afterAuto = await autoCompleteBiddingIfEnoughOffers(afterExpire);
 
-    // ensure offersCount exists
-    const offersCount =
-      typeof afterAuto?.offersCount === "number"
-        ? afterAuto.offersCount
-        : await countOffers(String(afterAuto._id));
-
-    return res.json({ ...afterAuto, offersCount });
+    return res.json(afterAuto);
   } catch (e) {
     console.error("Load request error:", e);
     return res.status(500).json({ error: "Server error" });
@@ -513,7 +585,7 @@ router.post("/:id/submit-for-review", async (req, res) => {
         $set: {
           status: STATUS.IN_REVIEW,
           submittedAt: new Date(),
-          submittedBy: user.username,
+          submittedBy: normalizeUsername(user.username),
           updatedAt: new Date(),
         },
       },
@@ -556,7 +628,7 @@ router.post("/:id/rp-approve", async (req, res) => {
         $set: {
           status: STATUS.APPROVED_FOR_SUBMISSION,
           rpApprovedAt: new Date(),
-          rpApprovedBy: user.username,
+          rpApprovedBy: normalizeUsername(user.username),
           updatedAt: new Date(),
         },
       },
@@ -601,7 +673,7 @@ router.post("/:id/rp-reject", async (req, res) => {
         $set: {
           status: STATUS.REJECTED,
           rpRejectedAt: new Date(),
-          rpRejectedBy: user.username,
+          rpRejectedBy: normalizeUsername(user.username),
           rpRejectReason: reason,
           updatedAt: new Date(),
         },
@@ -649,7 +721,7 @@ router.post("/:id/submit-for-bidding", async (req, res) => {
         $set: {
           status: STATUS.BIDDING,
           biddingStartedAt: new Date(),
-          biddingStartedBy: user.username,
+          biddingStartedBy: normalizeUsername(user.username),
           updatedAt: new Date(),
         },
       },
@@ -694,7 +766,7 @@ router.post("/:id/reactivate", async (req, res) => {
         $set: {
           status: STATUS.APPROVED_FOR_SUBMISSION,
           reactivatedAt: new Date(),
-          reactivatedBy: user.username,
+          reactivatedBy: normalizeUsername(user.username),
           updatedAt: new Date(),
         },
         $unset: {
@@ -715,20 +787,17 @@ router.post("/:id/reactivate", async (req, res) => {
 
 /* ================================
    RP recommends (BID_EVALUATION -> RECOMMENDED)
-   ✅ auto-completes first if offers already reached maxOffers
 ================================== */
 router.post("/:id/rp-recommend-offer", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isRP(user.role)) {
+    if (!isRP(user.role))
       return res
         .status(403)
         .json({ error: "Only RESOURCE_PLANNER can recommend" });
-    }
-    if (!user.username) {
+    if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
-    }
 
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
@@ -736,7 +805,6 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
     let doc = await db.collection("requests").findOne({ _id: id });
     if (!doc) return res.status(404).json({ error: "Request not found" });
 
-    // ✅ expire if due, then auto-complete if enough offers
     doc = await ensureExpiredIfDue(doc);
     doc = await autoCompleteBiddingIfEnoughOffers(doc);
 
@@ -750,7 +818,8 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
     const offerId = String(req.body?.offerId || "").trim();
     if (!offerId) return res.status(400).json({ error: "offerId is required" });
 
-    const offerObjId = new ObjectId(offerId);
+    const offerObjId = parseId(offerId);
+    if (!offerObjId) return res.status(400).json({ error: "Invalid offerId" });
 
     const offer = await db.collection("offers").findOne({ _id: offerObjId });
     if (!offer) return res.status(404).json({ error: "Offer not found" });
@@ -762,43 +831,38 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
     }
 
     const now = new Date();
-    const requestIdStr = String(doc._id);
 
-    // clear previous recommended offer
     await db
       .collection("offers")
       .updateMany(
-        { requestId: String(id), status: "RECOMMENDED" },
-        { $set: { status: "SUBMITTED", updatedAt: new Date() } },
+        { requestId: String(doc._id), status: "RECOMMENDED" },
+        { $set: { status: "SUBMITTED", updatedAt: now } },
       );
 
-    // mark new recommended offer
     await db
       .collection("offers")
       .updateOne(
-        { _id: new ObjectId(offerId) },
-        { $set: { status: "RECOMMENDED", updatedAt: new Date() } },
+        { _id: offerObjId },
+        { $set: { status: "RECOMMENDED", updatedAt: now } },
       );
 
-    // update request
     await db.collection("requests").updateOne(
       { _id: id },
       {
         $set: {
           status: STATUS.RECOMMENDED,
-          recommendedOfferId: offerId,
-          recommendedAt: new Date(),
-          recommendedBy: user.username,
-          updatedAt: new Date(),
+          recommendedOfferId: String(offerObjId),
+          recommendedAt: now,
+          recommendedBy: normalizeUsername(user.username),
+          updatedAt: now,
         },
       },
     );
 
-    // 🔑 RETURN UPDATED DATA
     const updatedRequest = await db.collection("requests").findOne({ _id: id });
     const updatedOffers = await db
       .collection("offers")
-      .find({ requestId: String(id) })
+      .find({ requestId: String(doc._id) })
       .sort({ createdAt: -1 })
       .toArray();
 
@@ -815,6 +879,7 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
 
 /* ================================
    PM: RECOMMENDED -> SENT_TO_PO
+   (returns updated request)
 ================================== */
 router.post("/:id/send-to-po", async (req, res) => {
   try {
@@ -838,14 +903,16 @@ router.post("/:id/send-to-po", async (req, res) => {
         .status(403)
         .json({ error: "Only RECOMMENDED can be sent to PO" });
 
+    const now = new Date();
+
     await db.collection("requests").updateOne(
       { _id: id, status: STATUS.RECOMMENDED },
       {
         $set: {
           status: STATUS.SENT_TO_PO,
-          sentToPoAt: new Date(),
-          sentToPoBy: user.username,
-          updatedAt: new Date(),
+          sentToPoAt: now,
+          sentToPoBy: normalizeUsername(user.username),
+          updatedAt: now,
         },
       },
     );
@@ -856,11 +923,12 @@ router.post("/:id/send-to-po", async (req, res) => {
       title: "New request for ordering",
       message: `A request "${doc.title || "Untitled"}" is ready for ordering.`,
       requestId: String(doc._id),
-      createdAt: new Date(),
+      createdAt: now,
       read: false,
     });
 
-    return res.json({ success: true });
+    const updated = await db.collection("requests").findOne({ _id: id });
+    return res.json({ success: true, request: updated });
   } catch (e) {
     console.error("send-to-po error:", e);
     return res.status(500).json({ error: "Server error" });
@@ -869,6 +937,7 @@ router.post("/:id/send-to-po", async (req, res) => {
 
 /* ================================
    PO: SENT_TO_PO -> ORDERED
+   (returns updated request + orderId)
 ================================== */
 router.post("/:id/order", async (req, res) => {
   try {
@@ -888,27 +957,24 @@ router.post("/:id/order", async (req, res) => {
 
     const st = String(requestDoc.status || "").toUpperCase();
     if (st !== STATUS.SENT_TO_PO) {
-      return res.status(403).json({
-        error: "Only SENT_TO_PO can be ordered",
-        status: st,
-      });
+      return res
+        .status(403)
+        .json({ error: "Only SENT_TO_PO can be ordered", status: st });
     }
 
-    // ✅ MUST order recommended offer (or allow override if you want)
     const offerId = String(
       req.body?.offerId || requestDoc.recommendedOfferId || "",
     ).trim();
-
     if (!offerId) {
       return res
         .status(400)
         .json({ error: "offerId missing (no recommended offer)" });
     }
 
-    const offer = await db
-      .collection("offers")
-      .findOne({ _id: new ObjectId(offerId) });
+    const offerObjId = parseId(offerId);
+    if (!offerObjId) return res.status(400).json({ error: "Invalid offerId" });
 
+    const offer = await db.collection("offers").findOne({ _id: offerObjId });
     if (!offer) return res.status(404).json({ error: "Offer not found" });
 
     if (String(offer.requestId) !== String(requestDoc._id)) {
@@ -919,11 +985,10 @@ router.post("/:id/order", async (req, res) => {
 
     const now = new Date();
 
-    // ✅ Create purchase order snapshot
     const po = {
       requestId: String(requestDoc._id),
       offerId: String(offer._id),
-      orderedBy: user.username,
+      orderedBy: normalizeUsername(user.username),
       orderedAt: now,
 
       totalPrice: offer.price ?? null,
@@ -934,7 +999,6 @@ router.post("/:id/order", async (req, res) => {
       rolesProvided: offer.rolesProvided || [],
       deliveryDays: offer.deliveryDays ?? null,
 
-      // optional snapshot to keep history
       snapshot: {
         requestTitle: requestDoc.title || "",
         requestType: requestDoc.type || "",
@@ -955,11 +1019,10 @@ router.post("/:id/order", async (req, res) => {
 
     const insert = await db.collection("purchase_orders").insertOne(po);
 
-    // ✅ Update offer + request
     await db
       .collection("offers")
       .updateOne(
-        { _id: new ObjectId(offerId) },
+        { _id: offerObjId },
         { $set: { status: "ORDERED", updatedAt: now } },
       );
 
@@ -970,22 +1033,23 @@ router.post("/:id/order", async (req, res) => {
           status: STATUS.ORDERED,
           orderId: String(insert.insertedId),
           orderedAt: now,
-          orderedBy: user.username,
+          orderedBy: normalizeUsername(user.username),
           orderedOfferId: String(offer._id),
           updatedAt: now,
         },
       },
     );
 
+    const updated = await db.collection("requests").findOne({ _id: id });
     return res.json({
       success: true,
       orderId: String(insert.insertedId),
+      request: updated,
     });
   } catch (e) {
     console.error("order error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
-
 
 export default router;

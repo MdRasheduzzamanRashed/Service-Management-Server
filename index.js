@@ -22,25 +22,26 @@ dotenv.config();
 const app = express();
 app.set("trust proxy", 1);
 
+// ✅ IMPORTANT: disable ETag (prevents 304 Not Modified issues)
+app.set("etag", false);
+
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8000;
 
-// ✅ Allowed origins (local + production)
 const allowlist = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
   process.env.CLIENT_URL, // e.g. https://service-management-client.vercel.app
 ].filter(Boolean);
 
-// ✅ CORS CONFIG (FULL)
+// ✅ CORS OPTIONS (supports Vercel preview + PATCH)
 const corsOptions = {
   origin(origin, cb) {
     if (!origin) return cb(null, true);
 
-    // allow exact allowlist
     if (allowlist.includes(origin)) return cb(null, true);
 
-    // allow all vercel domains (prod + preview)
+    // ✅ allow all vercel deployments (prod + preview)
     if (origin.endsWith(".vercel.app")) return cb(null, true);
 
     return cb(new Error("CORS blocked: " + origin), false);
@@ -61,10 +62,27 @@ app.options("*", cors(corsOptions));
 // ✅ Body parser
 app.use(express.json({ limit: "2mb" }));
 
+// ✅ IMPORTANT: disable caching for API responses (prevents 304 + stale data)
+app.use((req, res, next) => {
+  // If you want only API routes to be no-cache, keep it like this:
+  if (req.path.startsWith("/api/")) {
+    res.setHeader(
+      "Cache-Control",
+      "no-store, no-cache, must-revalidate, proxy-revalidate",
+    );
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Surrogate-Control", "no-store");
+  }
+  next();
+});
+
 // ✅ DB connect
 await connectDB();
 
-// ================= AUTO-EXPIRE BIDDING REQUESTS =================
+/* =========================
+   ✅ auto-expire job (your code unchanged)
+========================= */
 function computeEndsAt(doc) {
   if (!doc?.biddingStartedAt) return null;
   const days = Number(doc?.biddingCycleDays ?? 7);
@@ -84,7 +102,8 @@ async function expireDueBiddingRequests() {
 
   for await (const doc of cursor) {
     const endsAt = computeEndsAt(doc);
-    if (!endsAt || now < endsAt) continue;
+    if (!endsAt) continue;
+    if (now < endsAt) continue;
 
     const result = await db
       .collection("requests")
@@ -130,7 +149,9 @@ setInterval(
 
 expireDueBiddingRequests().catch(() => {});
 
-// ================= ROUTES =================
+/* =========================
+   ✅ Routes
+========================= */
 app.get("/", (req, res) => res.json({ status: "ok" }));
 
 app.use("/api/auth", authRoutes);
@@ -140,7 +161,9 @@ app.use("/api/bidding", biddingRoutes);
 app.use("/api/orders", ordersRoutes);
 app.use("/api/notifications", notificationsRoutes);
 
-// ================= SWAGGER =================
+/* =========================
+   ✅ Swagger
+========================= */
 app.use(
   "/api/docs",
   swaggerUi.serve,
@@ -155,10 +178,11 @@ app.get("/api/docs.json", (req, res) => {
   res.send(swaggerSpec);
 });
 
-// ================= SOCKET =================
+/* =========================
+   ✅ Socket + Listen
+========================= */
 initSocket(server);
 
-// ================= START SERVER =================
 server.listen(PORT, () => {
-  console.log("🚀 Backend running on port", PORT);
+  console.log("🚀 Backend listening on port", PORT);
 });
