@@ -6,7 +6,7 @@
   "scripts": {
     "swagger": "node swagger-autogen.js",
     "dev": "node index.js",
-    "start": "node index.js",
+    "start": "node swagger-autogen.js && node index.js",
     "build": "node swagger-autogen.js"
   },
   "dependencies": {
