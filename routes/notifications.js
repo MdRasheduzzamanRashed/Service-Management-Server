@@ -63,6 +63,24 @@ function parseId(idStr) {
   }
 }
 
+function matchForUser(user, { unreadOnly = false } = {}) {
+  const or = [];
+
+  if (user.username) or.push({ toUsername: normalizeUsername(user.username) });
+  if (user.role) or.push({ toRole: user.role });
+
+  const match = { $or: or.length ? or : [{ toRole: user.role }] };
+  if (unreadOnly) match.read = false;
+  return match;
+}
+
+function canAccessNotification(doc, user) {
+  const byRole = doc?.toRole && normalizeRole(doc.toRole) === user.role;
+  const byUser =
+    doc?.toUsername && normalizeUsername(doc.toUsername) === user.username;
+  return !!(byRole || byUser);
+}
+
 /* =========================
    GET /api/notifications
    Query:
@@ -84,19 +102,7 @@ router.get("/", async (req, res) => {
     const unreadOnly =
       String(req.query.unreadOnly || "").toLowerCase() === "true";
 
-    // user receives:
-    // - direct notifications: toUsername
-    // - role notifications: toRole
-    const match = {
-      $or: [
-        ...(user.username
-          ? [{ toUsername: normalizeUsername(user.username) }]
-          : []),
-        { toRole: user.role },
-      ],
-    };
-
-    if (unreadOnly) match.read = false;
+    const match = matchForUser(user, { unreadOnly });
 
     const total = await db.collection("notifications").countDocuments(match);
 
@@ -131,17 +137,9 @@ router.get("/unread-count", async (req, res) => {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
 
-    const match = {
-      read: false,
-      $or: [
-        ...(user.username
-          ? [{ toUsername: normalizeUsername(user.username) }]
-          : []),
-        { toRole: user.role },
-      ],
-    };
-
+    const match = matchForUser(user, { unreadOnly: true });
     const count = await db.collection("notifications").countDocuments(match);
+
     return res.json({ unreadCount: count });
   } catch (e) {
     console.error("unread-count error:", e);
@@ -160,15 +158,11 @@ router.post("/:id/read", async (req, res) => {
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid notification id" });
 
-    // ensure ownership by role/username
     const doc = await db.collection("notifications").findOne({ _id: id });
     if (!doc) return res.status(404).json({ error: "Not found" });
 
-    const can =
-      (doc.toRole && normalizeRole(doc.toRole) === user.role) ||
-      (doc.toUsername && normalizeUsername(doc.toUsername) === user.username);
-
-    if (!can) return res.status(403).json({ error: "Not allowed" });
+    if (!canAccessNotification(doc, user))
+      return res.status(403).json({ error: "Not allowed" });
 
     await db
       .collection("notifications")
@@ -189,13 +183,7 @@ router.post("/read-all", async (req, res) => {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
 
-    const match = {
-      read: false,
-      $or: [
-        ...(user.username ? [{ toUsername: user.username }] : []),
-        { toRole: user.role },
-      ],
-    };
+    const match = matchForUser(user, { unreadOnly: true });
 
     const r = await db.collection("notifications").updateMany(match, {
       $set: { read: true, readAt: new Date() },
@@ -204,6 +192,50 @@ router.post("/read-all", async (req, res) => {
     return res.json({ success: true, modified: r.modifiedCount || 0 });
   } catch (e) {
     console.error("read-all error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* =========================
+   DELETE /api/notifications/:id
+========================= */
+router.delete("/:id", async (req, res) => {
+  try {
+    const user = getUser(req);
+    if (user.error) return res.status(401).json({ error: user.error });
+
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid notification id" });
+
+    const doc = await db.collection("notifications").findOne({ _id: id });
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    if (!canAccessNotification(doc, user))
+      return res.status(403).json({ error: "Not allowed" });
+
+    await db.collection("notifications").deleteOne({ _id: id });
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("delete notification error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* =========================
+   POST /api/notifications/clear
+   clears ALL notifications for this user (dangerous but useful)
+========================= */
+router.post("/clear", async (req, res) => {
+  try {
+    const user = getUser(req);
+    if (user.error) return res.status(401).json({ error: user.error });
+
+    const match = matchForUser(user, { unreadOnly: false });
+    const r = await db.collection("notifications").deleteMany(match);
+
+    return res.json({ success: true, deleted: r.deletedCount || 0 });
+  } catch (e) {
+    console.error("clear notifications error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
