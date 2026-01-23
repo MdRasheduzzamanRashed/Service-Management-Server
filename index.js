@@ -48,11 +48,16 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+
+  // ✅ FIX: allow cache-control headers (and common cache headers)
   allowedHeaders: [
     "Content-Type",
     "Authorization",
     "x-user-role",
     "x-username",
+    "cache-control",
+    "pragma",
+    "expires",
   ],
 };
 
@@ -64,7 +69,6 @@ app.use(express.json({ limit: "2mb" }));
 
 // ✅ IMPORTANT: disable caching for API responses (prevents 304 + stale data)
 app.use((req, res, next) => {
-  // If you want only API routes to be no-cache, keep it like this:
   if (req.path.startsWith("/api/")) {
     res.setHeader(
       "Cache-Control",
@@ -81,7 +85,7 @@ app.use((req, res, next) => {
 await connectDB();
 
 /* =========================
-   ✅ auto-expire job (your code unchanged)
+   ✅ auto-expire job
 ========================= */
 function computeEndsAt(doc) {
   if (!doc?.biddingStartedAt) return null;
