@@ -8,6 +8,9 @@
   "servers": [
     {
       "url": "https://service-management-server.onrender.com/api"
+    },
+    {
+      "url": "http://localhost:8000/api"
     }
   ],
   "tags": [
@@ -1088,9 +1091,9 @@
   "components": {
     "securitySchemes": {
       "bearerAuth": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "Authorization",
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
         "description": "Use: Bearer <token> (optional in your current backend)"
       },
       "userRole": {
