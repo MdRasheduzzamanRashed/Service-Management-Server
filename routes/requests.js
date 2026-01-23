@@ -296,6 +296,7 @@ router.get("/", async (req, res) => {
    GET /api/requests/bidding
    - returns BIDDING requests (and those that just became BID_EVALUATION)
 ================================== */
+
 router.get("/bidding", async (req, res) => {
   try {
     const list = await db

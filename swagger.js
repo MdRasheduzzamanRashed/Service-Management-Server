@@ -1,15 +1,4 @@
-import swaggerJsdoc from "swagger-jsdoc";
+// swagger.js
+import swaggerDocument from "./swagger-output.json" assert { type: "json" };
 
-export const swaggerSpec = swaggerJsdoc({
-  definition: {
-    openapi: "3.0.0",
-    info: { title: "Service Management API", version: "1.0.0" },
-    servers: [{ url: process.env.PUBLIC_BASE_URL || "http://localhost:8000" }],
-    components: {
-      securitySchemes: {
-        bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
-      },
-    },
-  },
-  apis: ["./routes/*.js"],
-});
+export const swaggerSpec = swaggerDocument;
