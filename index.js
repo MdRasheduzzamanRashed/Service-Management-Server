@@ -4,16 +4,18 @@ import http from "http";
 import cors from "cors";
 import dotenv from "dotenv";
 import swaggerUi from "swagger-ui-express";
-import notificationsRoutes from "./routes/notifications.js";
+
 import { connectDB } from "./db.js";
 import { db } from "./db.js";
 import { swaggerSpec } from "./swagger.js";
 import { initSocket } from "./socket.js";
+
 import authRoutes from "./routes/auth.js";
 import requestsRoutes from "./routes/requests.js";
 import offersRoutes from "./routes/offers.js";
 import biddingRoutes from "./routes/bidding.js";
 import ordersRoutes from "./routes/orders.js";
+import notificationsRoutes from "./routes/notifications.js";
 
 dotenv.config();
 
@@ -23,64 +25,46 @@ app.set("trust proxy", 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8000;
 
+// ✅ Allowed origins (local + production)
 const allowlist = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  process.env.CLIENT_URL, // your Vercel domain
+  process.env.CLIENT_URL, // e.g. https://service-management-client.vercel.app
 ].filter(Boolean);
 
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      if (allowlist.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked: " + origin), false);
-    },
-    credentials: true, // ✅ MUST be true
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "x-user-role",
-      "x-username",
-    ],
-  }),
-);
+// ✅ CORS CONFIG (FULL)
+const corsOptions = {
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);
 
-// ✅ IMPORTANT: preflight must use SAME cors config (not default cors())
-app.options(
-  "*",
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      if (allowlist.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked: " + origin), false);
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "x-user-role",
-      "x-username",
-    ],
-  }),
-);
+    // allow exact allowlist
+    if (allowlist.includes(origin)) return cb(null, true);
 
-app.use("/api/notifications", notificationsRoutes);
-/* =========================
-   ✅ Body parser (before routes)
-========================= */
+    // allow all vercel domains (prod + preview)
+    if (origin.endsWith(".vercel.app")) return cb(null, true);
+
+    return cb(new Error("CORS blocked: " + origin), false);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "x-user-role",
+    "x-username",
+  ],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+// ✅ Body parser
 app.use(express.json({ limit: "2mb" }));
 
-/* =========================
-   DB connect
-========================= */
+// ✅ DB connect
 await connectDB();
 
-/* =========================
-   ✅ auto-expire job (your code unchanged)
-========================= */
+// ================= AUTO-EXPIRE BIDDING REQUESTS =================
 function computeEndsAt(doc) {
   if (!doc?.biddingStartedAt) return null;
   const days = Number(doc?.biddingCycleDays ?? 7);
@@ -100,8 +84,7 @@ async function expireDueBiddingRequests() {
 
   for await (const doc of cursor) {
     const endsAt = computeEndsAt(doc);
-    if (!endsAt) continue;
-    if (now < endsAt) continue;
+    if (!endsAt || now < endsAt) continue;
 
     const result = await db
       .collection("requests")
@@ -147,9 +130,7 @@ setInterval(
 
 expireDueBiddingRequests().catch(() => {});
 
-/* =========================
-   ✅ Routes (IMPORTANT: mount with prefixes)
-========================= */
+// ================= ROUTES =================
 app.get("/", (req, res) => res.json({ status: "ok" }));
 
 app.use("/api/auth", authRoutes);
@@ -157,10 +138,9 @@ app.use("/api/requests", requestsRoutes);
 app.use("/api/offers", offersRoutes);
 app.use("/api/bidding", biddingRoutes);
 app.use("/api/orders", ordersRoutes);
-/* =========================
-   Socket + Listen
-========================= */
-initSocket(server);
+app.use("/api/notifications", notificationsRoutes);
+
+// ================= SWAGGER =================
 app.use(
   "/api/docs",
   swaggerUi.serve,
@@ -174,6 +154,11 @@ app.get("/api/docs.json", (req, res) => {
   res.setHeader("Content-Type", "application/json");
   res.send(swaggerSpec);
 });
+
+// ================= SOCKET =================
+initSocket(server);
+
+// ================= START SERVER =================
 server.listen(PORT, () => {
-  console.log("Backend listening on port", PORT);
+  console.log("🚀 Backend running on port", PORT);
 });
