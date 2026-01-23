@@ -15,6 +15,7 @@ import offersRoutes from "./routes/offers.js";
 import biddingRoutes from "./routes/bidding.js";
 import ordersRoutes from "./routes/orders.js";
 import notificationsRoutes from "./routes/notifications.js";
+import evaluationsRoutes from "./routes/evaluations.js";
 
 dotenv.config();
 
@@ -109,6 +110,7 @@ app.use("/api/offers", offersRoutes);
 app.use("/api/bidding", biddingRoutes);
 app.use("/api/orders", ordersRoutes);
 app.use("/api/notifications", notificationsRoutes);
+app.use("/api/evaluations", evaluationsRoutes);
 
 /* =========================
    Swagger
