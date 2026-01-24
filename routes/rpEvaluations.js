@@ -4,7 +4,7 @@ import { db } from "../db.js";
 const router = express.Router();
 
 /* =========================
-   No-cache (recommended)
+   No-cache
 ========================= */
 router.use((req, res, next) => {
   res.setHeader(
@@ -18,7 +18,7 @@ router.use((req, res, next) => {
 });
 
 /* =========================
-   Auth helpers
+   Helpers
 ========================= */
 function normalizeRole(raw) {
   const s = String(raw || "").trim();
@@ -26,17 +26,11 @@ function normalizeRole(raw) {
   const upper = s.toUpperCase().replace(/\s+/g, "_");
   const noUnderscore = upper.replace(/_/g, "");
   const map = {
-    PROJECTMANAGER: "PROJECT_MANAGER",
-    PROJECT_MANAGER: "PROJECT_MANAGER",
-    PROCUREMENTOFFICER: "PROCUREMENT_OFFICER",
-    PROCUREMENT_OFFICER: "PROCUREMENT_OFFICER",
     RESOURCEPLANNER: "RESOURCE_PLANNER",
     RESOURCE_PLANNER: "RESOURCE_PLANNER",
     SYSTEMADMIN: "SYSTEM_ADMIN",
     SYSTEM_ADMIN: "SYSTEM_ADMIN",
     ADMIN: "SYSTEM_ADMIN",
-    SERVICEPROVIDER: "SERVICE_PROVIDER",
-    SERVICE_PROVIDER: "SERVICE_PROVIDER",
   };
   return map[noUnderscore] || map[upper] || upper;
 }
@@ -54,69 +48,70 @@ function getUser(req) {
   return { role, username };
 }
 
-function canReadOffers(role) {
-  return (
-    role === "RESOURCE_PLANNER" ||
-    role === "PROJECT_MANAGER" ||
-    role === "PROCUREMENT_OFFICER" ||
-    role === "SYSTEM_ADMIN"
-  );
+function canUse(role) {
+  return role === "RESOURCE_PLANNER" || role === "SYSTEM_ADMIN";
 }
 
 /* =========================
-   ✅ MAIN: GET /api/offers?requestId=...
-   (This is what your UI calls)
+   GET /api/rp-evaluations/:requestId
 ========================= */
-router.get("/", async (req, res) => {
+router.get("/:requestId", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!canReadOffers(user.role))
-      return res.status(403).json({ error: "Not allowed" });
-
-    const requestId = String(req.query.requestId || "").trim();
-    if (!requestId) return res.status(400).json({ error: "requestId missing" });
-
-    const offers = await db
-      .collection("offers")
-      .find({ requestId })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    // ✅ return ARRAY directly (works with old UI)
-    // return res.json(offers);
-
-    // ✅ OR return {data: offers} (works with new UI)
-    return res.json({ data: offers });
-  } catch (e) {
-    console.error("offers list error:", e);
-    return res.status(500).json({ error: "Server error" });
-  }
-});
-
-/* =========================
-   ✅ ALIAS: GET /api/offers/by-request/:requestId
-   (Keep your current route too)
-========================= */
-router.get("/by-request/:requestId", async (req, res) => {
-  try {
-    const user = getUser(req);
-    if (user.error) return res.status(401).json({ error: user.error });
-    if (!canReadOffers(user.role))
+    if (!canUse(user.role))
       return res.status(403).json({ error: "Not allowed" });
 
     const requestId = String(req.params.requestId || "").trim();
     if (!requestId) return res.status(400).json({ error: "requestId missing" });
 
-    const offers = await db
-      .collection("offers")
-      .find({ requestId })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    return res.json({ data: offers });
+    const doc = await db.collection("rp_evaluations").findOne({ requestId });
+    return res.json(doc || null);
   } catch (e) {
-    console.error("offers by-request error:", e);
+    console.error("rp-evaluations get error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* =========================
+   POST /api/rp-evaluations/:requestId
+   Saves/updates evaluation
+========================= */
+router.post("/:requestId", async (req, res) => {
+  try {
+    const user = getUser(req);
+    if (user.error) return res.status(401).json({ error: user.error });
+    if (!canUse(user.role))
+      return res.status(403).json({ error: "Not allowed" });
+
+    const requestId = String(req.params.requestId || "").trim();
+    if (!requestId) return res.status(400).json({ error: "requestId missing" });
+
+    const now = new Date();
+    const body = req.body || {};
+
+    const doc = {
+      requestId,
+      savedBy: user.username || "rp",
+      weights: body.weights || { price: 0.6, delivery: 0.25, quality: 0.15 },
+      comment: String(body.comment || ""),
+      recommendedOfferId: String(body.recommendedOfferId || ""),
+      offers: Array.isArray(body.offers) ? body.offers : [],
+      updatedAt: now,
+    };
+
+    await db
+      .collection("rp_evaluations")
+      .updateOne(
+        { requestId },
+        { $set: doc, $setOnInsert: { createdAt: now } },
+        { upsert: true },
+      );
+
+    const saved = await db.collection("rp_evaluations").findOne({ requestId });
+    return res.json({ success: true, data: saved });
+  } catch (e) {
+    console.error("rp-evaluations save error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
