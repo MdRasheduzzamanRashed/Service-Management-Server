@@ -7,15 +7,17 @@ import { createNotification } from "../utils/notify.js";
 const router = express.Router();
 
 /**
+ * ✅ SWAPPED RESPONSIBILITIES (as you requested)
+ *
  * STATUS FLOW:
  * PM: DRAFT -> IN_REVIEW
- * RP: IN_REVIEW -> APPROVED_FOR_SUBMISSION or REJECTED
+ * PO: IN_REVIEW -> APPROVED_FOR_SUBMISSION or REJECTED        ✅ (was RP)
  * PM: APPROVED_FOR_SUBMISSION -> BIDDING
  * SYSTEM: BIDDING -> EXPIRED (auto)
  * AUTO: BIDDING -> BID_EVALUATION (when offersCount >= maxOffers)
- * RP: BID_EVALUATION -> RECOMMENDED (select best offer)
+ * PO: BID_EVALUATION -> RECOMMENDED (select best offer)       ✅ (was RP)
  * PM: RECOMMENDED -> SENT_TO_PO
- * PO: SENT_TO_PO -> ORDERED
+ * RP: SENT_TO_PO -> ORDERED                                  ✅ (was PO)
  */
 const STATUS = {
   DRAFT: "DRAFT",
@@ -88,14 +90,29 @@ function canReadAll(role) {
     role === "SYSTEM_ADMIN"
   );
 }
+
 function isPM(role) {
   return role === "PROJECT_MANAGER";
 }
-function isRP(role) {
-  return role === "RESOURCE_PLANNER";
+
+/**
+ * ✅ Role mapping AFTER swap:
+ * - Reviewer (approve/reject IN_REVIEW): Procurement Officer (PO)
+ * - Evaluator (recommend offer in BID_EVALUATION): Procurement Officer (PO)
+ * - Ordering (ORDER after SENT_TO_PO): Resource Planner (RP)
+ */
+const ROLE_REVIEWER = "PROCUREMENT_OFFICER";
+const ROLE_EVALUATOR = "PROCUREMENT_OFFICER";
+const ROLE_ORDERING = "RESOURCE_PLANNER";
+
+function isReviewer(role) {
+  return role === ROLE_REVIEWER;
 }
-function isPO(role) {
-  return role === "PROCUREMENT_OFFICER";
+function isEvaluator(role) {
+  return role === ROLE_EVALUATOR;
+}
+function isOrderingRole(role) {
+  return role === ROLE_ORDERING;
 }
 
 function parseId(idStr) {
@@ -176,22 +193,17 @@ async function ensureExpiredIfDue(doc) {
 /* =========================
    Offers helpers (enterprise)
 ========================= */
-/**
- * Auto-complete: if offersCount >= maxOffers and status is BIDDING -> BID_EVALUATION
- * Uses doc.offersCount if present (from lookup), otherwise counts on demand.
- */
 async function autoCompleteBiddingIfEnoughOffers(reqDoc) {
   if (!reqDoc) return reqDoc;
 
   const st = String(reqDoc.status || "").toUpperCase();
-
   const requestId = String(reqDoc._id);
+
   const offersCount =
     typeof reqDoc.offersCount === "number"
       ? reqDoc.offersCount
       : await db.collection("offers").countDocuments({ requestId });
 
-  // always attach offersCount
   if (st !== STATUS.BIDDING) return { ...reqDoc, offersCount };
 
   const maxOffers = Number(reqDoc.maxOffers ?? 0);
@@ -211,7 +223,6 @@ async function autoCompleteBiddingIfEnoughOffers(reqDoc) {
       },
     );
 
-    // ✅ notify PM owner + RP role (idempotent)
     if (reqDoc.createdBy) {
       await createNotification({
         uniqKey: `${requestId}:AUTO_TO_BID_EVAL_PM`,
@@ -224,8 +235,8 @@ async function autoCompleteBiddingIfEnoughOffers(reqDoc) {
     }
 
     await createNotification({
-      uniqKey: `${requestId}:AUTO_TO_BID_EVAL_RP`,
-      toRole: "RESOURCE_PLANNER",
+      uniqKey: `${requestId}:AUTO_TO_BID_EVAL_EVALUATOR`,
+      toRole: ROLE_EVALUATOR,
       type: "REQUEST_STATUS",
       title: "Requests ready for evaluation",
       message: `Request "${reqDoc.title || "Untitled"}" is now in BID_EVALUATION.`,
@@ -267,16 +278,19 @@ router.post("/", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isPM(user.role))
+    if (!isPM(user.role)) {
       return res
         .status(403)
         .json({ error: "Only PROJECT_MANAGER can create requests" });
-    if (!user.username)
+    }
+    if (!user.username) {
       return res.status(401).json({ error: "Missing x-username" });
+    }
 
     const body = req.body || {};
-    if (!body.title || !String(body.title).trim())
+    if (!body.title || !String(body.title).trim()) {
       return res.status(400).json({ error: "Title is required" });
+    }
 
     const doc = {
       ...body,
@@ -288,7 +302,6 @@ router.post("/", async (req, res) => {
 
     const result = await db.collection("requests").insertOne(doc);
 
-    // optional: notify creator (idempotent not needed here)
     await createNotification({
       toUsername: doc.createdBy,
       type: "REQUEST_STATUS",
@@ -312,8 +325,9 @@ router.get("/", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!canReadAll(user.role))
+    if (!canReadAll(user.role)) {
       return res.status(403).json({ error: "Not allowed to view requests." });
+    }
 
     const status = String(req.query.status || "")
       .trim()
@@ -331,12 +345,14 @@ router.get("/", async (req, res) => {
     if (status) match.status = status;
 
     if (view === "my") {
-      if (!isPM(user.role))
+      if (!isPM(user.role)) {
         return res
           .status(403)
           .json({ error: "Only PROJECT_MANAGER can use view=my" });
-      if (!user.username)
+      }
+      if (!user.username) {
         return res.status(401).json({ error: "Missing x-username" });
+      }
       match.createdBy = normalizeUsername(user.username);
     }
 
@@ -468,8 +484,9 @@ router.get("/:id", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!canReadAll(user.role))
+    if (!canReadAll(user.role)) {
       return res.status(403).json({ error: "Not allowed to view requests." });
+    }
 
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
@@ -497,12 +514,14 @@ router.put("/:id", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isPM(user.role))
+    if (!isPM(user.role)) {
       return res
         .status(403)
         .json({ error: "Only PROJECT_MANAGER can update requests" });
-    if (!user.username)
+    }
+    if (!user.username) {
       return res.status(401).json({ error: "Missing x-username" });
+    }
 
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
@@ -512,10 +531,12 @@ router.put("/:id", async (req, res) => {
 
     if (!isOwner(existing, user.username))
       return res.status(403).json({ error: "Not allowed" });
-    if (String(existing.status || "").toUpperCase() !== STATUS.DRAFT)
+
+    if (String(existing.status || "").toUpperCase() !== STATUS.DRAFT) {
       return res
         .status(403)
         .json({ error: "Only DRAFT requests can be edited" });
+    }
 
     await db
       .collection("requests")
@@ -536,12 +557,14 @@ router.delete("/:id", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isPM(user.role))
+    if (!isPM(user.role)) {
       return res
         .status(403)
         .json({ error: "Only PROJECT_MANAGER can delete requests" });
-    if (!user.username)
+    }
+    if (!user.username) {
       return res.status(401).json({ error: "Missing x-username" });
+    }
 
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
@@ -551,10 +574,12 @@ router.delete("/:id", async (req, res) => {
 
     if (!isOwner(existing, user.username))
       return res.status(403).json({ error: "Not allowed" });
-    if (String(existing.status || "").toUpperCase() !== STATUS.DRAFT)
+
+    if (String(existing.status || "").toUpperCase() !== STATUS.DRAFT) {
       return res
         .status(403)
         .json({ error: "Only DRAFT requests can be deleted" });
+    }
 
     await db.collection("requests").deleteOne({ _id: id });
     return res.json({ success: true });
@@ -573,12 +598,14 @@ router.post("/:id/submit-for-review", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isPM(user.role))
+    if (!isPM(user.role)) {
       return res
         .status(403)
         .json({ error: "Only PROJECT_MANAGER can submit for review" });
-    if (!user.username)
+    }
+    if (!user.username) {
       return res.status(401).json({ error: "Missing x-username" });
+    }
 
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
@@ -588,10 +615,11 @@ router.post("/:id/submit-for-review", async (req, res) => {
     if (!isOwner(doc, user.username))
       return res.status(403).json({ error: "Not allowed" });
 
-    if (String(doc.status || "").toUpperCase() !== STATUS.DRAFT)
+    if (String(doc.status || "").toUpperCase() !== STATUS.DRAFT) {
       return res
         .status(403)
         .json({ error: "Only DRAFT can be submitted for review" });
+    }
 
     const now = new Date();
 
@@ -607,10 +635,9 @@ router.post("/:id/submit-for-review", async (req, res) => {
       },
     );
 
-    // ✅ Notify RP role + PM owner
     await createNotification({
-      uniqKey: `${String(id)}:SUBMITTED_FOR_REVIEW_RP`,
-      toRole: "RESOURCE_PLANNER",
+      uniqKey: `${String(id)}:SUBMITTED_FOR_REVIEW_REVIEWER`,
+      toRole: ROLE_REVIEWER,
       type: "REQUEST_STATUS",
       title: "New request in review",
       message: `Request "${doc.title || "Untitled"}" submitted for review.`,
@@ -634,15 +661,18 @@ router.post("/:id/submit-for-review", async (req, res) => {
   }
 });
 
-// RP: IN_REVIEW -> APPROVED_FOR_SUBMISSION
+// Reviewer (swapped): IN_REVIEW -> APPROVED_FOR_SUBMISSION
 router.post("/:id/rp-approve", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isRP(user.role))
+
+    if (!isReviewer(user.role)) {
       return res
         .status(403)
-        .json({ error: "Only RESOURCE_PLANNER can approve" });
+        .json({ error: `Only ${ROLE_REVIEWER} can approve` });
+    }
+
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
@@ -652,10 +682,11 @@ router.post("/:id/rp-approve", async (req, res) => {
     const doc = await db.collection("requests").findOne({ _id: id });
     if (!doc) return res.status(404).json({ error: "Request not found" });
 
-    if (String(doc.status || "").toUpperCase() !== STATUS.IN_REVIEW)
+    if (String(doc.status || "").toUpperCase() !== STATUS.IN_REVIEW) {
       return res
         .status(403)
         .json({ error: "Only IN_REVIEW requests can be approved" });
+    }
 
     const now = new Date();
 
@@ -671,9 +702,8 @@ router.post("/:id/rp-approve", async (req, res) => {
       },
     );
 
-    // ✅ Notify PM owner
     await createNotification({
-      uniqKey: `${String(id)}:RP_APPROVED`,
+      uniqKey: `${String(id)}:REVIEW_APPROVED`,
       toUsername: doc.createdBy,
       type: "REQUEST_STATUS",
       title: "Request approved",
@@ -689,15 +719,18 @@ router.post("/:id/rp-approve", async (req, res) => {
   }
 });
 
-// RP: IN_REVIEW -> REJECTED
+// Reviewer (swapped): IN_REVIEW -> REJECTED
 router.post("/:id/rp-reject", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isRP(user.role))
+
+    if (!isReviewer(user.role)) {
       return res
         .status(403)
-        .json({ error: "Only RESOURCE_PLANNER can reject" });
+        .json({ error: `Only ${ROLE_REVIEWER} can reject` });
+    }
+
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
@@ -707,10 +740,11 @@ router.post("/:id/rp-reject", async (req, res) => {
     const doc = await db.collection("requests").findOne({ _id: id });
     if (!doc) return res.status(404).json({ error: "Request not found" });
 
-    if (String(doc.status || "").toUpperCase() !== STATUS.IN_REVIEW)
+    if (String(doc.status || "").toUpperCase() !== STATUS.IN_REVIEW) {
       return res
         .status(403)
         .json({ error: "Only IN_REVIEW requests can be rejected" });
+    }
 
     const reason = String(req.body?.reason || "").trim();
     const now = new Date();
@@ -728,14 +762,14 @@ router.post("/:id/rp-reject", async (req, res) => {
       },
     );
 
-    // ✅ Notify PM owner
     await createNotification({
-      uniqKey: `${String(id)}:RP_REJECTED`,
+      uniqKey: `${String(id)}:REVIEW_REJECTED`,
       toUsername: doc.createdBy,
       type: "REQUEST_STATUS",
       title: "Request rejected",
-      message:
-        `Your request "${doc.title || "Untitled"}" was rejected. ${reason ? `Reason: ${reason}` : ""}`.trim(),
+      message: `Your request "${doc.title || "Untitled"}" was rejected. ${
+        reason ? `Reason: ${reason}` : ""
+      }`.trim(),
       requestId: String(id),
     });
 
@@ -752,10 +786,11 @@ router.post("/:id/submit-for-bidding", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isPM(user.role))
+    if (!isPM(user.role)) {
       return res
         .status(403)
         .json({ error: "Only PROJECT_MANAGER can submit for bidding" });
+    }
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
@@ -769,10 +804,11 @@ router.post("/:id/submit-for-bidding", async (req, res) => {
 
     if (
       String(doc.status || "").toUpperCase() !== STATUS.APPROVED_FOR_SUBMISSION
-    )
+    ) {
       return res
         .status(403)
         .json({ error: "Only APPROVED_FOR_SUBMISSION can go to BIDDING" });
+    }
 
     const now = new Date();
 
@@ -788,7 +824,6 @@ router.post("/:id/submit-for-bidding", async (req, res) => {
       },
     );
 
-    // ✅ Notify service providers + PM owner
     await createNotification({
       uniqKey: `${String(id)}:BIDDING_OPEN_SP`,
       toRole: "SERVICE_PROVIDER",
@@ -820,10 +855,11 @@ router.post("/:id/reactivate", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isPM(user.role))
+    if (!isPM(user.role)) {
       return res
         .status(403)
         .json({ error: "Only PROJECT_MANAGER can reactivate" });
+    }
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
@@ -835,10 +871,11 @@ router.post("/:id/reactivate", async (req, res) => {
     if (!isOwner(doc, user.username))
       return res.status(403).json({ error: "Not allowed" });
 
-    if (String(doc.status || "").toUpperCase() !== STATUS.EXPIRED)
+    if (String(doc.status || "").toUpperCase() !== STATUS.EXPIRED) {
       return res
         .status(403)
         .json({ error: "Only EXPIRED requests can be reactivated" });
+    }
 
     const now = new Date();
 
@@ -859,7 +896,6 @@ router.post("/:id/reactivate", async (req, res) => {
       },
     );
 
-    // ✅ Notify PM owner
     await createNotification({
       uniqKey: `${String(id)}:REACTIVATED`,
       toUsername: doc.createdBy,
@@ -878,16 +914,20 @@ router.post("/:id/reactivate", async (req, res) => {
 });
 
 /* ================================
-   RP recommends (BID_EVALUATION -> RECOMMENDED)
+   ✅ Evaluator swapped: BID_EVALUATION -> RECOMMENDED
+   Supports BOTH routes:
+   - POST /api/requests/:id/po-recommend-offer (new, matches frontend)
 ================================== */
-router.post("/:id/rp-recommend-offer", async (req, res) => {
+async function recommendOfferHandler(req, res) {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isRP(user.role))
+
+    if (!isEvaluator(user.role)) {
       return res
         .status(403)
-        .json({ error: "Only RESOURCE_PLANNER can recommend" });
+        .json({ error: `Only ${ROLE_EVALUATOR} can recommend` });
+    }
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
@@ -924,6 +964,7 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
 
     const now = new Date();
 
+    // reset previously recommended offer(s)
     await db
       .collection("offers")
       .updateMany(
@@ -931,6 +972,7 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
         { $set: { status: "SUBMITTED", updatedAt: now } },
       );
 
+    // mark selected offer as recommended
     await db
       .collection("offers")
       .updateOne(
@@ -938,6 +980,7 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
         { $set: { status: "RECOMMENDED", updatedAt: now } },
       );
 
+    // update request status
     await db.collection("requests").updateOne(
       { _id: id },
       {
@@ -951,7 +994,7 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
       },
     );
 
-    // ✅ Notify PM owner + PO role
+    // notify PM owner
     await createNotification({
       uniqKey: `${String(id)}:RECOMMENDED_PM`,
       toUsername: doc.createdBy,
@@ -961,12 +1004,13 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
       requestId: String(id),
     });
 
+    // notify ordering role (RP)
     await createNotification({
-      uniqKey: `${String(id)}:RECOMMENDED_PO`,
-      toRole: "PROCUREMENT_OFFICER",
+      uniqKey: `${String(id)}:RECOMMENDED_ORDERING_ROLE`,
+      toRole: ROLE_ORDERING,
       type: "REQUEST_STATUS",
       title: "Upcoming order request",
-      message: `Request "${doc.title || "Untitled"}" is RECOMMENDED (PM may send to PO soon).`,
+      message: `Request "${doc.title || "Untitled"}" is RECOMMENDED (PM may send for ordering soon).`,
       requestId: String(id),
     });
 
@@ -983,10 +1027,13 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
       offers: updatedOffers,
     });
   } catch (e) {
-    console.error("rp-recommend-offer error:", e);
+    console.error("recommend-offer error:", e);
     return res.status(500).json({ error: "Server error" });
   }
-});
+}
+
+// ✅ new route (matches frontend)
+router.post("/:id/po-recommend-offer", recommendOfferHandler);
 
 /* ================================
    PM: RECOMMENDED -> SENT_TO_PO
@@ -1008,10 +1055,11 @@ router.post("/:id/send-to-po", async (req, res) => {
     if (!isOwner(doc, user.username))
       return res.status(403).json({ error: "Not allowed" });
 
-    if (String(doc.status || "").toUpperCase() !== STATUS.RECOMMENDED)
+    if (String(doc.status || "").toUpperCase() !== STATUS.RECOMMENDED) {
       return res
         .status(403)
         .json({ error: "Only RECOMMENDED can be sent to PO" });
+    }
 
     const now = new Date();
 
@@ -1027,17 +1075,16 @@ router.post("/:id/send-to-po", async (req, res) => {
       },
     );
 
-    // ✅ Notify PO role (idempotent)
+    // swapped: notify ordering role (RP)
     await createNotification({
       uniqKey: `${String(id)}:SENT_TO_PO`,
-      toRole: "PROCUREMENT_OFFICER",
+      toRole: ROLE_ORDERING,
       type: "REQUEST_SENT_TO_PO",
       title: "New request for ordering",
       message: `A request "${doc.title || "Untitled"}" is ready for ordering.`,
       requestId: String(doc._id),
     });
 
-    // ✅ Notify PM owner copy
     await createNotification({
       uniqKey: `${String(id)}:SENT_TO_PO_PM`,
       toUsername: doc.createdBy,
@@ -1056,14 +1103,16 @@ router.post("/:id/send-to-po", async (req, res) => {
 });
 
 /* ================================
-   PO: SENT_TO_PO -> ORDERED
+   ✅ Ordering swapped: SENT_TO_PO -> ORDERED (RP orders)
 ================================== */
 router.post("/:id/order", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
-    if (!isPO(user.role))
-      return res.status(403).json({ error: "Only PROCUREMENT_OFFICER" });
+
+    if (!isOrderingRole(user.role)) {
+      return res.status(403).json({ error: `Only ${ROLE_ORDERING} can order` });
+    }
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
@@ -1084,11 +1133,10 @@ router.post("/:id/order", async (req, res) => {
     const offerId = String(
       req.body?.offerId || requestDoc.recommendedOfferId || "",
     ).trim();
-    if (!offerId) {
+    if (!offerId)
       return res
         .status(400)
         .json({ error: "offerId missing (no recommended offer)" });
-    }
 
     const offerObjId = parseId(offerId);
     if (!offerObjId) return res.status(400).json({ error: "Invalid offerId" });
@@ -1159,7 +1207,6 @@ router.post("/:id/order", async (req, res) => {
       },
     );
 
-    // ✅ Notify PM owner
     await createNotification({
       uniqKey: `${String(id)}:ORDERED_PM`,
       toUsername: requestDoc.createdBy,
@@ -1169,10 +1216,9 @@ router.post("/:id/order", async (req, res) => {
       requestId: String(id),
     });
 
-    // optional: notify PO role copy (if you want everyone in PO role see it)
     await createNotification({
-      uniqKey: `${String(id)}:ORDERED_PO`,
-      toRole: "PROCUREMENT_OFFICER",
+      uniqKey: `${String(id)}:ORDERED_ORDERING_ROLE`,
+      toRole: ROLE_ORDERING,
       type: "REQUEST_STATUS",
       title: "Order placed",
       message: `Order placed for request "${requestDoc.title || "Untitled"}".`,

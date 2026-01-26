@@ -15,7 +15,7 @@ import offersRoutes from "./routes/offers.js";
 import biddingRoutes from "./routes/bidding.js";
 import ordersRoutes from "./routes/orders.js";
 import notificationsRoutes from "./routes/notifications.js";
-import rpEvaluationsRoutes from "./routes/rpEvaluations.js";
+import poEvaluationsRoutes from "./routes/poEvaluations.js";
 
 
 dotenv.config();
@@ -111,7 +111,7 @@ app.use("/api/offers", offersRoutes);
 app.use("/api/bidding", biddingRoutes);
 app.use("/api/orders", ordersRoutes);
 app.use("/api/notifications", notificationsRoutes);
-app.use("/api/rp-evaluations", rpEvaluationsRoutes);
+app.use("/api/po-evaluations", poEvaluationsRoutes);
 
 
 /* =========================
