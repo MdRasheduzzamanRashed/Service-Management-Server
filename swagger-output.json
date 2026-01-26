@@ -580,7 +580,7 @@
         }
       }
     },
-    "/api/requests/{id}/po-recommend-offer": {
+    "/api/requests/{id}/rp-recommend-offer": {
       "post": {
         "description": "",
         "parameters": [
@@ -615,7 +615,7 @@
         }
       }
     },
-    "/api/requests/{id}/send-to-po": {
+    "/api/requests/{id}/send-to-rp": {
       "post": {
         "description": "",
         "parameters": [
