@@ -16,8 +16,8 @@ const router = express.Router();
  * SYSTEM: BIDDING -> EXPIRED (auto)
  * AUTO: BIDDING -> BID_EVALUATION (when offersCount >= maxOffers)
  * PO: BID_EVALUATION -> RECOMMENDED (select best offer)       ✅ (was RP)
- * PM: RECOMMENDED -> SENT_TO_PO
- * RP: SENT_TO_PO -> ORDERED                                  ✅ (was PO)
+ * PM: RECOMMENDED -> SENT_TO_RP
+ * RP: SENT_TO_RP -> ORDERED                                  ✅ (was PO)
  */
 const STATUS = {
   DRAFT: "DRAFT",
@@ -26,7 +26,7 @@ const STATUS = {
   BIDDING: "BIDDING",
   BID_EVALUATION: "BID_EVALUATION",
   RECOMMENDED: "RECOMMENDED",
-  SENT_TO_PO: "SENT_TO_PO",
+  SENT_TO_RP: "SENT_TO_RP",
   ORDERED: "ORDERED",
   REJECTED: "REJECTED",
   EXPIRED: "EXPIRED",
@@ -99,10 +99,10 @@ function isPM(role) {
  * ✅ Role mapping AFTER swap:
  * - Reviewer (approve/reject IN_REVIEW): Procurement Officer (PO)
  * - Evaluator (recommend offer in BID_EVALUATION): Procurement Officer (PO)
- * - Ordering (ORDER after SENT_TO_PO): Resource Planner (RP)
+ * - Ordering (ORDER after SENT_TO_RP): Resource Planner (RP)
  */
 const ROLE_REVIEWER = "PROCUREMENT_OFFICER";
-const ROLE_EVALUATOR = "PROCUREMENT_OFFICER";
+const ROLE_EVALUATOR = "RESOURCE_PLANNER";
 const ROLE_ORDERING = "RESOURCE_PLANNER";
 
 function isReviewer(role) {
@@ -913,50 +913,51 @@ router.post("/:id/reactivate", async (req, res) => {
   }
 });
 
-/* ================================
-   ✅ Evaluator swapped: BID_EVALUATION -> RECOMMENDED
-   Supports BOTH routes:
-   - POST /api/requests/:id/po-recommend-offer (new, matches frontend)
-================================== */
-async function recommendOfferHandler(req, res) {
+// =====================================================
+// ✅ Evaluator (PO): BID_EVALUATION -> RECOMMENDED
+// POST /api/requests/:id/rp-recommend-offer
+// Body: { offerId: "..." }
+// Allowed: PROCUREMENT_OFFICER, SYSTEM_ADMIN
+// =====================================================
+
+router.post("/:id/rp-recommend-offer", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
 
-    if (!isEvaluator(user.role)) {
-      return res
-        .status(403)
-        .json({ error: `Only ${ROLE_EVALUATOR} can recommend` });
+    // ✅ Evaluator = RESOURCE_PLANNER (as you confirmed)
+    if (!(user.role === "RESOURCE_PLANNER" || user.role === "SYSTEM_ADMIN")) {
+      return res.status(403).json({ error: "Not allowed" });
     }
+
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
+    // ✅ Request ID = Mongo ObjectId
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
 
-    let doc = await db.collection("requests").findOne({ _id: id });
-    if (!doc) return res.status(404).json({ error: "Request not found" });
+    const offerId = String(req.body?.offerId || "").trim();
+    if (!offerId) return res.status(400).json({ error: "offerId missing" });
 
-    doc = await ensureExpiredIfDue(doc);
-    doc = await autoCompleteBiddingIfEnoughOffers(doc);
+    // ✅ Load request by _id (correct)
+    const reqDoc = await db.collection("requests").findOne({ _id: id });
+    if (!reqDoc) return res.status(404).json({ error: "Request not found" });
 
-    const st = String(doc.status || "").toUpperCase();
-    if (st !== STATUS.BID_EVALUATION) {
-      return res
-        .status(403)
-        .json({ error: "Only BID_EVALUATION can be recommended" });
+    // ✅ Status check
+    const status = String(reqDoc.status || "").toUpperCase();
+    if (status !== "BID_EVALUATION") {
+      return res.status(400).json({
+        error: `Cannot recommend when status is ${status}. Must be BID_EVALUATION.`,
+      });
     }
 
-    const offerId = String(req.body?.offerId || "").trim();
-    if (!offerId) return res.status(400).json({ error: "offerId is required" });
-
-    const offerObjId = parseId(offerId);
-    if (!offerObjId) return res.status(400).json({ error: "Invalid offerId" });
-
-    const offer = await db.collection("offers").findOne({ _id: offerObjId });
+    // ✅ Load offer by string _id (NO ObjectId!)
+    const offer = await db.collection("offers").findOne({ _id: offerId });
     if (!offer) return res.status(404).json({ error: "Offer not found" });
 
-    if (String(offer.requestId) !== String(doc._id)) {
+    // ✅ Check offer belongs to request
+    if (String(offer.requestId) !== String(reqDoc._id)) {
       return res
         .status(403)
         .json({ error: "Offer does not belong to this request" });
@@ -964,81 +965,35 @@ async function recommendOfferHandler(req, res) {
 
     const now = new Date();
 
-    // reset previously recommended offer(s)
-    await db
-      .collection("offers")
-      .updateMany(
-        { requestId: String(doc._id), status: "RECOMMENDED" },
-        { $set: { status: "SUBMITTED", updatedAt: now } },
-      );
-
-    // mark selected offer as recommended
-    await db
-      .collection("offers")
-      .updateOne(
-        { _id: offerObjId },
-        { $set: { status: "RECOMMENDED", updatedAt: now } },
-      );
-
-    // update request status
+    // ✅ Update request
     await db.collection("requests").updateOne(
       { _id: id },
       {
         $set: {
-          status: STATUS.RECOMMENDED,
-          recommendedOfferId: String(offerObjId),
+          status: "RECOMMENDED",
+          recommendedOfferId: offerId,
+          recommendedBy: user.username,
           recommendedAt: now,
-          recommendedBy: normalizeUsername(user.username),
           updatedAt: now,
         },
       },
     );
 
-    // notify PM owner
-    await createNotification({
-      uniqKey: `${String(id)}:RECOMMENDED_PM`,
-      toUsername: doc.createdBy,
-      type: "REQUEST_STATUS",
-      title: "Offer recommended",
-      message: `Request "${doc.title || "Untitled"}" is now RECOMMENDED.`,
-      requestId: String(id),
-    });
+    const updated = await db.collection("requests").findOne({ _id: id });
 
-    // notify ordering role (RP)
-    await createNotification({
-      uniqKey: `${String(id)}:RECOMMENDED_ORDERING_ROLE`,
-      toRole: ROLE_ORDERING,
-      type: "REQUEST_STATUS",
-      title: "Upcoming order request",
-      message: `Request "${doc.title || "Untitled"}" is RECOMMENDED (PM may send for ordering soon).`,
-      requestId: String(id),
-    });
-
-    const updatedRequest = await db.collection("requests").findOne({ _id: id });
-    const updatedOffers = await db
-      .collection("offers")
-      .find({ requestId: String(doc._id) })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    return res.json({
-      success: true,
-      request: updatedRequest,
-      offers: updatedOffers,
-    });
+    return res.json({ success: true, data: updated });
   } catch (e) {
-    console.error("recommend-offer error:", e);
+    console.error("rp-recommend-offer error:", e);
     return res.status(500).json({ error: "Server error" });
   }
-}
+});
 
-// ✅ new route (matches frontend)
-router.post("/:id/po-recommend-offer", recommendOfferHandler);
+
 
 /* ================================
-   PM: RECOMMENDED -> SENT_TO_PO
+   PM: RECOMMENDED -> SENT_TO_RP
 ================================== */
-router.post("/:id/send-to-po", async (req, res) => {
+router.post("/:id/send-to-rp", async (req, res) => {
   try {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
@@ -1067,7 +1022,7 @@ router.post("/:id/send-to-po", async (req, res) => {
       { _id: id, status: STATUS.RECOMMENDED },
       {
         $set: {
-          status: STATUS.SENT_TO_PO,
+          status: STATUS.SENT_TO_RP,
           sentToPoAt: now,
           sentToPoBy: normalizeUsername(user.username),
           updatedAt: now,
@@ -1077,33 +1032,33 @@ router.post("/:id/send-to-po", async (req, res) => {
 
     // swapped: notify ordering role (RP)
     await createNotification({
-      uniqKey: `${String(id)}:SENT_TO_PO`,
+      uniqKey: `${String(id)}:SENT_TO_RP`,
       toRole: ROLE_ORDERING,
-      type: "REQUEST_SENT_TO_PO",
+      type: "REQUEST_SENT_TO_RP",
       title: "New request for ordering",
       message: `A request "${doc.title || "Untitled"}" is ready for ordering.`,
       requestId: String(doc._id),
     });
 
     await createNotification({
-      uniqKey: `${String(id)}:SENT_TO_PO_PM`,
+      uniqKey: `${String(id)}:SENT_TO_RP_PM`,
       toUsername: doc.createdBy,
       type: "REQUEST_STATUS",
       title: "Sent to procurement",
-      message: `Your request "${doc.title || "Untitled"}" is now SENT_TO_PO.`,
+      message: `Your request "${doc.title || "Untitled"}" is now SENT_TO_RP.`,
       requestId: String(doc._id),
     });
 
     const updated = await db.collection("requests").findOne({ _id: id });
     return res.json({ success: true, request: updated });
   } catch (e) {
-    console.error("send-to-po error:", e);
+    console.error("send-to-rp error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ================================
-   ✅ Ordering swapped: SENT_TO_PO -> ORDERED (RP orders)
+   ✅ Ordering swapped: SENT_TO_RP -> ORDERED (RP orders)
 ================================== */
 router.post("/:id/order", async (req, res) => {
   try {
@@ -1124,10 +1079,10 @@ router.post("/:id/order", async (req, res) => {
       return res.status(404).json({ error: "Request not found" });
 
     const st = String(requestDoc.status || "").toUpperCase();
-    if (st !== STATUS.SENT_TO_PO) {
+    if (st !== STATUS.SENT_TO_RP) {
       return res
         .status(403)
-        .json({ error: "Only SENT_TO_PO can be ordered", status: st });
+        .json({ error: "Only SENT_TO_RP can be ordered", status: st });
     }
 
     const offerId = String(
@@ -1194,7 +1149,7 @@ router.post("/:id/order", async (req, res) => {
       );
 
     await db.collection("requests").updateOne(
-      { _id: id, status: STATUS.SENT_TO_PO },
+      { _id: id, status: STATUS.SENT_TO_RP },
       {
         $set: {
           status: STATUS.ORDERED,

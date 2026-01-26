@@ -27,8 +27,8 @@ function normalizeRole(raw) {
   const noUnderscore = upper.replace(/_/g, "");
 
   const map = {
-    PROCUREMENTOFFICER: "PROCUREMENT_OFFICER",
-    PROCUREMENT_OFFICER: "PROCUREMENT_OFFICER",
+    RESOURCEPLANNER: "RESOURCE_PLANNER",
+    RESOURCE_PLANNER: "RESOURCE_PLANNER",
     SYSTEMADMIN: "SYSTEM_ADMIN",
     SYSTEM_ADMIN: "SYSTEM_ADMIN",
     ADMIN: "SYSTEM_ADMIN",
@@ -51,10 +51,10 @@ function getUser(req) {
 }
 
 function canUse(role) {
-  return role === "PROCUREMENT_OFFICER" || role === "SYSTEM_ADMIN";
+  return role === "RESOURCE_PLANNER" || role === "SYSTEM_ADMIN";
 }
 
-const COLL = "po_evaluations";
+const COLL = "rp_evaluations";
 
 /* =========================
    Core handlers (shared)
@@ -108,22 +108,22 @@ async function handlePost(req, res) {
 }
 
 /* =========================
-   ✅ NEW ROUTES: /api/po-evaluations/:requestId
+   ✅ NEW ROUTES: /api/rp-evaluations/:requestId
 ========================= */
-router.get("/po/:requestId", async (req, res) => {
+router.get("/rp/:requestId", async (req, res) => {
   try {
     return await handleGet(req, res);
   } catch (e) {
-    console.error("po-evaluations get error:", e);
+    console.error("rp-evaluations get error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-router.post("/po/:requestId", async (req, res) => {
+router.post("/rp/:requestId", async (req, res) => {
   try {
     return await handlePost(req, res);
   } catch (e) {
-    console.error("po-evaluations save error:", e);
+    console.error("rp-evaluations save error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });

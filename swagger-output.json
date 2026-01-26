@@ -1051,7 +1051,7 @@
         }
       }
     },
-    "/api/po-evaluations/po/{requestId}": {
+    "/api/rp-evaluations/rp/{requestId}": {
       "get": {
         "description": "",
         "parameters": [
@@ -1136,7 +1136,7 @@
         }
       }
     },
-    "/api/po-evaluations/{requestId}": {
+    "/api/rp-evaluations/{requestId}": {
       "get": {
         "description": "",
         "parameters": [

@@ -28,8 +28,6 @@ function normalizeRole(raw) {
   const map = {
     PROJECTMANAGER: "PROJECT_MANAGER",
     PROJECT_MANAGER: "PROJECT_MANAGER",
-    PROCUREMENTOFFICER: "PROCUREMENT_OFFICER",
-    PROCUREMENT_OFFICER: "PROCUREMENT_OFFICER",
     RESOURCEPLANNER: "RESOURCE_PLANNER",
     RESOURCE_PLANNER: "RESOURCE_PLANNER",
     SYSTEMADMIN: "SYSTEM_ADMIN",
@@ -60,9 +58,7 @@ function isAdmin(role) {
 function isPM(role) {
   return role === "PROJECT_MANAGER";
 }
-function isPO(role) {
-  return role === "PROCUREMENT_OFFICER"; // ✅ evaluator after swap
-}
+
 function isRP(role) {
   return role === "RESOURCE_PLANNER"; // ✅ ordering after swap
 }
@@ -79,7 +75,7 @@ function isSP(role) {
  * - Admin: always allowed
  * - PO: allowed (evaluator)
  * - PM: allowed only for own requests
- * - RP: allowed only when request is in ordering stage (SENT_TO_PO / ORDERED)
+ * - RP: allowed only when request is in ordering stage (SENT_TO_RP / ORDERED)
  * - SP: allowed only for their own offers
  */
 async function canReadOffersForRequest({ user, requestId }) {
@@ -121,7 +117,7 @@ async function getRequestMetaByStringId(requestIdStr) {
 
 function isOrderingStage(status) {
   const st = String(status || "").toUpperCase();
-  return st === "SENT_TO_PO" || st === "ORDERED";
+  return st === "SENT_TO_RP" || st === "ORDERED";
 }
 
 /* =========================
@@ -149,8 +145,8 @@ router.get("/", async (req, res) => {
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
-    // ✅ PO (evaluator) can read offers for evaluation
-    if (isPO(user.role)) {
+    // ✅ RP (evaluator) can read offers for evaluation
+    if (isRP(user.role)) {
       const offers = await db
         .collection("offers")
         .find({ requestId })
@@ -244,7 +240,7 @@ router.get("/by-request/:requestId", async (req, res) => {
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
-    if (isPO(user.role)) {
+    if (isRP(user.role)) {
       const offers = await db
         .collection("offers")
         .find({ requestId })
@@ -256,7 +252,7 @@ router.get("/by-request/:requestId", async (req, res) => {
     const reqMeta = await getRequestMetaByStringId(requestId);
     if (!reqMeta) return res.status(404).json({ error: "Request not found" });
 
-    if (isPM(user.role)) {
+    if (isRP(user.role)) {
       if (
         normalizeUsername(reqMeta.createdBy) !==
         normalizeUsername(user.username)
