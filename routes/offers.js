@@ -300,5 +300,155 @@ router.get("/by-request/:requestId", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+/* =========================================================
+   ✅ PUBLIC PUSH (NO AUTH)
+   POST /api/offers/public-push
+   Body: { offer: { ...full offer json... } }
+
+   Rules:
+   - must contain offer.requestId
+   - requestId must match an existing request
+   - request must be in BIDDING status
+   - saves full JSON into offers collection
+========================================================= */
+// ✅ PUBLIC JSON OFFER PUSH (NO AUTH) - supports SINGLE or ARRAY
+router.post("/public-push", async (req, res) => {
+  try {
+    const body = req.body;
+
+    // ✅ accept object or array
+    const incoming = Array.isArray(body) ? body : [body];
+    if (!incoming.length)
+      return res.status(400).json({ error: "Empty payload" });
+
+    // ✅ ensure every item is an object
+    for (const it of incoming) {
+      if (!it || typeof it !== "object" || Array.isArray(it)) {
+        return res.status(400).json({ error: "Each offer must be an object" });
+      }
+    }
+
+    // ✅ all offers must share same requestId
+    const requestId = String(incoming[0]?.requestId || "").trim();
+    if (!requestId)
+      return res.status(400).json({ error: "requestId is required" });
+
+    const allSame = incoming.every(
+      (o) => String(o?.requestId || "").trim() === requestId,
+    );
+    if (!allSame) {
+      return res.status(400).json({
+        error: "All offers in one submit must have the same requestId",
+      });
+    }
+
+    // ✅ Load request by string form of ObjectId
+    const reqArr = await db
+      .collection("requests")
+      .aggregate([
+        { $match: { $expr: { $eq: [{ $toString: "$_id" }, requestId] } } },
+        { $project: { status: 1, maxOffers: 1, maxAcceptedOffers: 1 } },
+        { $limit: 1 },
+      ])
+      .toArray();
+
+    const request = reqArr?.[0];
+    if (!request) return res.status(404).json({ error: "Request not found" });
+
+    const status = String(request.status || "").toUpperCase();
+    if (status !== "BIDDING") {
+      return res.status(400).json({
+        error: `Offers allowed only when status is BIDDING (current: ${request.status})`,
+      });
+    }
+
+    // ✅ enforce global offer limit using maxOffers
+    const maxOffers = Number(request.maxOffers || 0);
+    const existingCount = await db
+      .collection("offers")
+      .countDocuments({ requestId });
+    const incomingCount = incoming.length;
+
+    if (maxOffers > 0 && existingCount + incomingCount > maxOffers) {
+      return res.status(403).json({
+        error: `Offer limit exceeded for this request. Existing=${existingCount}, Incoming=${incomingCount}, maxOffers=${maxOffers}`,
+      });
+    }
+
+    // ✅ recommended: require providerUsername (so you can block duplicates)
+    for (const o of incoming) {
+      const pu = String(o?.providerUsername || "")
+        .trim()
+        .toLowerCase();
+      if (!pu) {
+        return res.status(400).json({
+          error:
+            'Each offer must include "providerUsername" (public endpoint needs it).',
+        });
+      }
+    }
+
+    // ✅ block duplicates inside the same payload (same provider twice)
+    const providerUsernames = incoming.map((o) =>
+      String(o.providerUsername).trim().toLowerCase(),
+    );
+    const uniqueProviders = new Set(providerUsernames);
+    if (uniqueProviders.size !== providerUsernames.length) {
+      return res.status(400).json({
+        error: "Duplicate providerUsername found in the same submit payload.",
+      });
+    }
+
+    // ✅ block duplicates already in DB (same provider already submitted for this request)
+    const existingProviders = await db
+      .collection("offers")
+      .find(
+        { requestId, providerUsername: { $in: [...uniqueProviders] } },
+        { projection: { providerUsername: 1 } },
+      )
+      .toArray();
+
+    if (existingProviders.length) {
+      return res.status(403).json({
+        error:
+          "One or more providers already submitted an offer for this request.",
+        providers: existingProviders.map((x) => x.providerUsername),
+      });
+    }
+
+    // ✅ insert exactly what they sent (plus timestamps + normalized requestId/providerUsername)
+    const now = new Date();
+    const docs = incoming.map((o) => ({
+      ...o,
+      requestId, // force normalized requestId
+      providerUsername: String(o.providerUsername).trim().toLowerCase(),
+      status: o.status || "SUBMITTED",
+      createdAt: o.createdAt ? new Date(o.createdAt) : now,
+      updatedAt: now,
+    }));
+
+    const result = await db.collection("offers").insertMany(docs);
+
+    return res.json({
+      success: true,
+      insertedCount: result.insertedCount,
+      insertedIds: Object.values(result.insertedIds).map(String),
+      message: "Offers submitted successfully",
+      meta: {
+        requestId,
+        existingCountBefore: existingCount,
+        maxOffers: maxOffers || null,
+        remainingSlots:
+          maxOffers > 0
+            ? Math.max(0, maxOffers - (existingCount + incomingCount))
+            : null,
+      },
+    });
+  } catch (e) {
+    console.error("public-push error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 
 export default router;

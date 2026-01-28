@@ -127,6 +127,32 @@ function isOwner(doc, username) {
   if (!username) return false;
   return normalizeUsername(doc?.createdBy) === normalizeUsername(username);
 }
+async function findOfferByAnyId(offerIdRaw) {
+  const oidStr = String(offerIdRaw || "").trim();
+  if (!oidStr) return null;
+
+  // 1) try string _id
+  const byString = await db.collection("offers").findOne({ _id: oidStr });
+  if (byString) return byString;
+
+  // 2) try ObjectId _id
+  const asObj = parseId(oidStr);
+  if (asObj) {
+    const byObj = await db.collection("offers").findOne({ _id: asObj });
+    if (byObj) return byObj;
+  }
+
+  // 3) fallback: match by toString(_id)
+  const arr = await db
+    .collection("offers")
+    .aggregate([
+      { $match: { $expr: { $eq: [{ $toString: "$_id" }, oidStr] } } },
+      { $limit: 1 },
+    ])
+    .toArray();
+
+  return arr?.[0] || null;
+}
 
 /* =========================
    Pagination helpers
@@ -925,26 +951,23 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
     const user = getUser(req);
     if (user.error) return res.status(401).json({ error: user.error });
 
-    // ✅ Evaluator = RESOURCE_PLANNER (as you confirmed)
-    if (!(user.role === "RESOURCE_PLANNER" || user.role === "SYSTEM_ADMIN")) {
+    // ✅ Evaluator = RESOURCE_PLANNER (your workflow)
+    if (!(isEvaluator(user.role) || user.role === "SYSTEM_ADMIN")) {
       return res.status(403).json({ error: "Not allowed" });
     }
 
     if (!user.username)
       return res.status(401).json({ error: "Missing x-username" });
 
-    // ✅ Request ID = Mongo ObjectId
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
 
-    const offerId = String(req.body?.offerId || "").trim();
-    if (!offerId) return res.status(400).json({ error: "offerId missing" });
+    const offerIdRaw = String(req.body?.offerId || "").trim();
+    if (!offerIdRaw) return res.status(400).json({ error: "offerId missing" });
 
-    // ✅ Load request by _id (correct)
     const reqDoc = await db.collection("requests").findOne({ _id: id });
     if (!reqDoc) return res.status(404).json({ error: "Request not found" });
 
-    // ✅ Status check
     const status = String(reqDoc.status || "").toUpperCase();
     if (status !== "BID_EVALUATION") {
       return res.status(400).json({
@@ -952,11 +975,11 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
       });
     }
 
-    // ✅ Load offer by string _id (NO ObjectId!)
-    const offer = await db.collection("offers").findOne({ _id: offerId });
+    // ✅ Works for both string _id and ObjectId _id
+    const offer = await findOfferByAnyId(offerIdRaw);
     if (!offer) return res.status(404).json({ error: "Offer not found" });
 
-    // ✅ Check offer belongs to request
+    // ✅ Offer must belong to this request
     if (String(offer.requestId) !== String(reqDoc._id)) {
       return res
         .status(403)
@@ -964,15 +987,15 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
     }
 
     const now = new Date();
+    const offerIdNormalized = String(offer._id); // always store as string
 
-    // ✅ Update request
     await db.collection("requests").updateOne(
       { _id: id },
       {
         $set: {
           status: "RECOMMENDED",
-          recommendedOfferId: offerId,
-          recommendedBy: user.username,
+          recommendedOfferId: offerIdNormalized,
+          recommendedBy: normalizeUsername(user.username),
           recommendedAt: now,
           updatedAt: now,
         },
@@ -980,15 +1003,12 @@ router.post("/:id/rp-recommend-offer", async (req, res) => {
     );
 
     const updated = await db.collection("requests").findOne({ _id: id });
-
     return res.json({ success: true, data: updated });
   } catch (e) {
     console.error("rp-recommend-offer error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
-
-
 
 /* ================================
    PM: RECOMMENDED -> SENT_TO_RP
@@ -1068,8 +1088,9 @@ router.post("/:id/order", async (req, res) => {
     if (!isOrderingRole(user.role)) {
       return res.status(403).json({ error: `Only ${ROLE_ORDERING} can order` });
     }
-    if (!user.username)
+    if (!user.username) {
       return res.status(401).json({ error: "Missing x-username" });
+    }
 
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid request id" });
@@ -1088,17 +1109,18 @@ router.post("/:id/order", async (req, res) => {
     const offerId = String(
       req.body?.offerId || requestDoc.recommendedOfferId || "",
     ).trim();
-    if (!offerId)
+
+    if (!offerId) {
       return res
         .status(400)
         .json({ error: "offerId missing (no recommended offer)" });
+    }
 
-    const offerObjId = parseId(offerId);
-    if (!offerObjId) return res.status(400).json({ error: "Invalid offerId" });
-
-    const offer = await db.collection("offers").findOne({ _id: offerObjId });
+    // ✅ supports string _id and ObjectId _id offers
+    const offer = await findOfferByAnyId(offerId);
     if (!offer) return res.status(404).json({ error: "Offer not found" });
 
+    // ✅ must belong to this request
     if (String(offer.requestId) !== String(requestDoc._id)) {
       return res
         .status(403)
@@ -1141,10 +1163,11 @@ router.post("/:id/order", async (req, res) => {
 
     const insert = await db.collection("purchase_orders").insertOne(po);
 
+    // ✅ FIXED: update using the real offer._id (string OR ObjectId)
     await db
       .collection("offers")
       .updateOne(
-        { _id: offerObjId },
+        { _id: offer._id },
         { $set: { status: "ORDERED", updatedAt: now } },
       );
 
@@ -1191,5 +1214,6 @@ router.post("/:id/order", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 
 export default router;
